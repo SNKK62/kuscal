@@ -1,3 +1,14 @@
+use nom::{
+    branch::alt,
+    bytes::complete::tag,
+    character::complete::{alpha1, alphanumeric1, char, multispace0},
+    combinator::recognize,
+    multi::{fold_many0, many0},
+    number::complete::recognize_float,
+    sequence::{delimited, pair},
+    IResult,
+};
+
 fn main() {
     let input = "123";
     println!("source: {:?}, parsed: {:?}", input, expr(input));
@@ -15,169 +26,61 @@ fn main() {
     println!("source: {:?}, parsed: {:?}", input, expr(input));
 }
 
-fn advance_char(input: &str) -> &str {
-    let mut chars = input.chars();
-    chars.next();
-    chars.as_str()
-}
-
-fn peek_char(input: &str) -> Option<char> {
-    input.chars().next()
-}
-
-#[derive(Debug, PartialEq)]
-enum Expression<'src> {
+#[derive(Debug, PartialEq, Clone)]
+enum Token<'src> {
     Ident(&'src str),
-    NumLiteral(f64),
+    Number(f64),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum Expression<'src> {
+    Value(Token<'src>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
 }
 
-fn expr(input: &str) -> Option<(&str, Expression)> {
-    if let Some(res) = add(input) {
-        return Some(res);
-    }
-    if let Some(res) = term(input) {
-        return Some(res);
-    }
-    None
+fn term(i: &str) -> IResult<&str, Expression> {
+    alt((number, ident, parens))(i)
 }
 
-fn paren(input: &str) -> Option<(&str, Expression)> {
-    let next_input = lparen(whitespace(input))?;
-    let (next_input, expr) = expr(next_input)?;
-    let next_input = rparen(whitespace(next_input))?;
-    Some((next_input, expr))
+fn ident(input: &str) -> IResult<&str, Expression> {
+    let (r, res) = delimited(multispace0, identifier, multispace0)(input)?;
+    Ok((r, Expression::Value(Token::Ident(res))))
 }
 
-fn add_term(input: &str) -> Option<(&str, Expression)> {
-    let (next_input, lhs) = term(input)?;
-    let next_input = plus(whitespace(next_input))?;
-    Some((next_input, lhs))
+fn identifier(input: &str) -> IResult<&str, &str> {
+    recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0(alt((alphanumeric1, tag("_")))),
+    ))(input)
 }
 
-fn add(mut input: &str) -> Option<(&str, Expression)> {
-    let mut left = None;
-    while let Some((next_input, expr)) = add_term(input) {
-        if let Some(prev_left) = left {
-            left = Some(Expression::Add(Box::new(prev_left), Box::new(expr)));
-        } else {
-            left = Some(expr);
-        }
-        input = next_input;
-    }
-    let left = left?;
-
-    let (next_input, rhs) = expr(input)?;
-    Some((next_input, Expression::Add(Box::new(left), Box::new(rhs))))
+fn number(input: &str) -> IResult<&str, Expression> {
+    let (r, v) = delimited(multispace0, recognize_float, multispace0)(input)?;
+    Ok((
+        r,
+        Expression::Value(Token::Number(v.parse().map_err(|_| {
+            nom::Err::Error(nom::error::Error {
+                input,
+                code: nom::error::ErrorKind::Digit,
+            })
+        })?)),
+    ))
 }
 
-fn term(input: &str) -> Option<(&str, Expression)> {
-    if let Some(res) = paren(input) {
-        return Some(res);
-    }
-
-    if let Some(res) = token(input) {
-        return Some(res);
-    }
-    None
+fn parens(i: &str) -> IResult<&str, Expression> {
+    delimited(
+        multispace0,
+        delimited(tag("("), expr, tag(")")),
+        multispace0,
+    )(i)
 }
 
-fn token(input: &str) -> Option<(&str, Expression)> {
-    if let Some(res) = ident(whitespace(input)) {
-        return Some(res);
-    }
-    if let Some(res) = number(whitespace(input)) {
-        return Some(res);
-    }
-    None
-}
+fn expr(i: &str) -> IResult<&str, Expression> {
+    let (i, init) = term(i)?;
 
-fn whitespace(mut input: &str) -> &str {
-    while matches!(peek_char(input), Some(' ')) {
-        input = advance_char(input);
-    }
-    input
-}
-
-fn ident(mut input: &str) -> Option<(&str, Expression)> {
-    let start = input;
-    if matches!(peek_char(input), Some(_x @ ('a'..='z' | 'A'..='Z'))) {
-        input = advance_char(input);
-        while matches!(
-            peek_char(input),
-            Some(_x @ ('a'..='z' | 'A'..='Z' | '0'..='9'))
-        ) {
-            input = advance_char(input);
-        }
-    }
-    if start.len() == input.len() {
-        None
-    } else {
-        Some((
-            input,
-            Expression::Ident(&start[..(start.len() - input.len())]),
-        ))
-    }
-}
-
-fn number(mut input: &str) -> Option<(&str, Expression)> {
-    let start = input;
-    if matches!(peek_char(input), Some(_x @ ('-' | '+' | '.' | '0'..='9'))) {
-        input = advance_char(input);
-        while matches!(peek_char(input), Some(_x @ ('.' | '0'..='9'))) {
-            input = advance_char(input);
-        }
-    }
-    if let Ok(num) = start[..(start.len() - input.len())].parse::<f64>() {
-        Some((input, Expression::NumLiteral(num)))
-    } else {
-        None
-    }
-}
-
-fn lparen(input: &str) -> Option<&str> {
-    if matches!(peek_char(input), Some('(')) {
-        Some(advance_char(input))
-    } else {
-        None
-    }
-}
-
-fn rparen(input: &str) -> Option<&str> {
-    if matches!(peek_char(input), Some(')')) {
-        Some(advance_char(input))
-    } else {
-        None
-    }
-}
-
-fn plus(input: &str) -> Option<&str> {
-    if matches!(peek_char(input), Some('+')) {
-        Some(advance_char(input))
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_whitespace() {
-        assert_eq!(whitespace("    "), "");
-    }
-
-    #[test]
-    fn test_ident() {
-        assert_eq!(ident("Adam"), Some(("", Expression::Ident("Adam"))));
-    }
-
-    #[test]
-    fn test_number() {
-        assert_eq!(
-            number("123.45 "),
-            Some((" ", Expression::NumLiteral(123.45)))
-        );
-    }
+    fold_many0(
+        pair(delimited(multispace0, char('+'), multispace0), term),
+        move || init.clone(),
+        |acc, (_op, val): (char, Expression)| Expression::Add(Box::new(acc), Box::new(val)),
+    )(i)
 }
