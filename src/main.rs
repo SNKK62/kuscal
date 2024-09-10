@@ -6,9 +6,9 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
     combinator::{opt, recognize},
     error::ParseError,
-    multi::{fold_many0, many0, separated_list0},
+    multi::{fold_many0, many0},
     number::complete::recognize_float,
-    sequence::{delimited, pair, preceded},
+    sequence::{delimited, pair, preceded, terminated},
     Finish, IResult, Parser,
 };
 
@@ -17,7 +17,7 @@ fn main() {
     if !std::io::stdin().read_to_string(&mut buf).is_ok() {
         panic!("Failed to read from stdin");
     }
-    let parsed_statements = match statements(&buf) {
+    let parsed_statements = match statements_finish(&buf) {
         Ok(parsed_statements) => parsed_statements,
         Err(e) => {
             eprintln!("Parse error: {e:?}");
@@ -27,21 +27,40 @@ fn main() {
 
     let mut variables = HashMap::new();
 
-    for statement in parsed_statements {
+    eval_stmts(&parsed_statements, &mut variables)
+}
+
+type Variables = HashMap<String, f64>;
+
+fn eval_stmts(stmts: &[Statement], variables: &mut Variables) {
+    for statement in stmts {
         match statement {
             Statement::Expression(expr) => {
-                println!("eval: {:?}", eval(expr, &variables))
+                println!("eval: {:?}", eval(expr, variables))
             }
             Statement::VarDef(name, expr) => {
-                let value = eval(expr, &variables);
-                variables.insert(name, value);
+                let value = eval(expr, variables);
+                variables.insert(name.to_string(), value);
             }
             Statement::VarAssign(name, expr) => {
-                if !variables.contains_key(name) {
+                if !variables.contains_key(*name) {
                     panic!("Variable {name:?} is not defined");
                 }
-                let value = eval(expr, &variables);
-                variables.insert(name, value);
+                let value = eval(expr, variables);
+                variables.insert(name.to_string(), value);
+            }
+            Statement::For {
+                loop_var,
+                start,
+                end,
+                stmts,
+            } => {
+                let start = eval(start, variables) as isize;
+                let end = eval(end, variables) as isize;
+                for i in start..end {
+                    variables.insert(loop_var.to_string(), i as f64);
+                    eval_stmts(stmts, variables);
+                }
             }
         }
     }
@@ -68,6 +87,12 @@ enum Statement<'src> {
     Expression(Expression<'src>),
     VarDef(&'src str, Expression<'src>),
     VarAssign(&'src str, Expression<'src>),
+    For {
+        loop_var: &'src str,
+        start: Expression<'src>,
+        end: Expression<'src>,
+        stmts: Statements<'src>,
+    },
 }
 
 type Statements<'a> = Vec<Statement<'a>>;
@@ -92,16 +117,44 @@ fn expr_statement(i: &str) -> IResult<&str, Statement> {
     Ok((i, Statement::Expression(expr)))
 }
 
-fn statement(i: &str) -> IResult<&str, Statement> {
-    alt((var_def, var_assign, expr_statement))(i)
+fn for_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("for"))(i)?;
+    let (i, loop_var) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(tag("in"))(i)?;
+    let (i, start) = space_delimited(expr)(i)?;
+    let (i, _) = space_delimited(tag("to"))(i)?;
+    let (i, end) = space_delimited(expr)(i)?;
+    let (i, stmts) = delimited(open_brace, statements, close_brace)(i)?;
+    Ok((
+        i,
+        Statement::For {
+            loop_var,
+            start,
+            end,
+            stmts,
+        },
+    ))
 }
 
-fn statements(i: &str) -> Result<Statements, nom::error::Error<&str>> {
-    let (_, res) = separated_list0(tag(";"), statement)(i).finish()?;
+fn statement(i: &str) -> IResult<&str, Statement> {
+    alt((
+        for_statement,
+        terminated(alt((var_def, var_assign, expr_statement)), char(';')),
+    ))(i)
+}
+
+fn statements_finish(i: &str) -> Result<Statements, nom::error::Error<&str>> {
+    let (_, res) = statements(i).finish()?;
     Ok(res)
 }
 
-fn unary_fn(f: fn(f64) -> f64) -> impl Fn(Vec<Expression>, &HashMap<&str, f64>) -> f64 {
+fn statements(i: &str) -> IResult<&str, Statements> {
+    let (i, stmts) = many0(statement)(i)?;
+    let (i, _) = opt(char(';'))(i)?;
+    Ok((i, stmts))
+}
+
+fn unary_fn(f: fn(f64) -> f64) -> impl Fn(&[Expression], &Variables) -> f64 {
     move |args, variables| {
         f(eval(
             args.into_iter().next().expect("function missing argument"),
@@ -110,7 +163,7 @@ fn unary_fn(f: fn(f64) -> f64) -> impl Fn(Vec<Expression>, &HashMap<&str, f64>) 
     }
 }
 
-fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(Vec<Expression>, &HashMap<&str, f64>) -> f64 {
+fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(&[Expression], &Variables) -> f64 {
     move |args, variables| {
         let mut args = args.into_iter();
         let lhs = eval(
@@ -125,12 +178,12 @@ fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(Vec<Expression>, &HashMap<&str, 
     }
 }
 
-fn eval(expr: Expression, vars: &HashMap<&str, f64>) -> f64 {
+fn eval(expr: &Expression, vars: &Variables) -> f64 {
     use Expression::*;
     match expr {
         Ident("pi") => std::f64::consts::PI,
-        Ident(id) => *vars.get(id).expect("Variable not found"),
-        NumLiteral(n) => n,
+        Ident(id) => *vars.get(*id).expect("Variable not found"),
+        NumLiteral(n) => *n,
         FnInvoke("sqrt", args) => unary_fn(f64::sqrt)(args, vars),
         FnInvoke("sin", args) => unary_fn(f64::sin)(args, vars),
         FnInvoke("cos", args) => unary_fn(f64::cos)(args, vars),
@@ -146,15 +199,15 @@ fn eval(expr: Expression, vars: &HashMap<&str, f64>) -> f64 {
         FnInvoke(name, _) => {
             panic!("Unknown function {name:?}")
         }
-        Add(lhs, rhs) => eval(*lhs, vars) + eval(*rhs, vars),
-        Sub(lhs, rhs) => eval(*lhs, vars) - eval(*rhs, vars),
-        Mul(lhs, rhs) => eval(*lhs, vars) * eval(*rhs, vars),
-        Div(lhs, rhs) => eval(*lhs, vars) / eval(*rhs, vars),
+        Add(lhs, rhs) => eval(lhs, vars) + eval(rhs, vars),
+        Sub(lhs, rhs) => eval(lhs, vars) - eval(rhs, vars),
+        Mul(lhs, rhs) => eval(lhs, vars) * eval(rhs, vars),
+        Div(lhs, rhs) => eval(lhs, vars) / eval(rhs, vars),
         If(cond, t_case, f_case) => {
-            if eval(*cond, vars) != 0. {
-                eval(*t_case, vars)
+            if eval(cond, vars) != 0. {
+                eval(t_case, vars)
             } else if let Some(f_case) = f_case {
-                eval(*f_case, vars)
+                eval(f_case, vars)
             } else {
                 0.
             }
