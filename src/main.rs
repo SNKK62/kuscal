@@ -14,7 +14,7 @@ use nom::{
 
 fn main() {
     let mut buf = String::new();
-    if !std::io::stdin().read_to_string(&mut buf).is_ok() {
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
         panic!("Failed to read from stdin");
     }
     let parsed_statements = match statements_finish(&buf) {
@@ -157,7 +157,7 @@ fn statements(i: &str) -> IResult<&str, Statements> {
 fn unary_fn(f: fn(f64) -> f64) -> impl Fn(&[Expression], &Variables) -> f64 {
     move |args, variables| {
         f(eval(
-            args.into_iter().next().expect("function missing argument"),
+            args.iter().next().expect("function missing argument"),
             variables,
         ))
     }
@@ -165,7 +165,7 @@ fn unary_fn(f: fn(f64) -> f64) -> impl Fn(&[Expression], &Variables) -> f64 {
 
 fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(&[Expression], &Variables) -> f64 {
     move |args, variables| {
-        let mut args = args.into_iter();
+        let mut args = args.iter();
         let lhs = eval(
             args.next().expect("function missing the first argument"),
             variables,
