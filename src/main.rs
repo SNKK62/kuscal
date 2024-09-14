@@ -112,8 +112,9 @@ struct UserFn<'src> {
     stmts: Statements<'src>,
 }
 
+type NativeFnCode = Box<dyn Fn(&[f64]) -> f64>;
 struct NativeFn {
-    code: Box<dyn Fn(&[f64]) -> f64>,
+    code: NativeFnCode,
 }
 
 impl<'src> FnDef<'src> {
