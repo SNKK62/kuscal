@@ -1,0 +1,8 @@
+fn early_return(a, b) {
+    var one = 1;
+    if one {
+        return a;
+    };
+    b;
+}
+print(early_return(1, 2));
