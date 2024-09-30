@@ -1,0 +1,7 @@
+for i in 0 to 3 {
+    if i {
+        print(i);
+    };
+    continue;
+    print(i * -1);
+}
