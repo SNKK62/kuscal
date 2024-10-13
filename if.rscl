@@ -1,4 +1,4 @@
 var one = 1;
-var a = if one { 1 } else { 2 };
+var a = if one > 2 { 1 } else { 2 };
 
 print(a + 10);
