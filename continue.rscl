@@ -1,6 +1,10 @@
+var a = 0;
 for i in 0 to 3 {
     if i < 1 {
         continue;
     };
-    print(i);
+    a = a + i;
 }
+if 0 < a {
+    print(a);
+};

@@ -424,6 +424,7 @@ fn var_assign(i: &str) -> IResult<&str, Statement> {
     let (i, ident) = space_delimited(identifier)(i)?;
     let (i, _) = space_delimited(tag("="))(i)?;
     let (i, expr) = space_delimited(expr)(i)?;
+    let (i, _) = space_delimited(char(';'))(i)?;
     Ok((i, Statement::VarAssign(ident, expr)))
 }
 
