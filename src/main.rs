@@ -1,10 +1,10 @@
-use std::{collections::HashMap, io::Read, ops::ControlFlow};
+use std::{cmp::Ordering, collections::HashMap, io::Read, ops::ControlFlow};
 
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
-    combinator::{opt, recognize},
+    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, none_of},
+    combinator::{map_res, opt, recognize},
     error::ParseError,
     multi::{fold_many0, many0, separated_list0},
     number::complete::recognize_float,
@@ -29,17 +29,151 @@ fn main() {
     eval_stmts(&parsed_statements, &mut frame);
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Value {
+    F64(f64),
+    I64(i64),
+    Str(String),
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::F64(v) => write!(f, "{v}"),
+            Value::I64(v) => write!(f, "{v}"),
+            Value::Str(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Value::F64(lhs), Value::F64(rhs)) => lhs.partial_cmp(rhs),
+            (Value::I64(lhs), Value::I64(rhs)) => lhs.partial_cmp(rhs),
+            (Value::F64(lhs), Value::I64(rhs)) => lhs.partial_cmp(&(*rhs as f64)),
+            (Value::I64(lhs), Value::F64(rhs)) => (*lhs as f64).partial_cmp(rhs),
+            (Value::Str(lhs), Value::Str(rhs)) => lhs.partial_cmp(rhs),
+            _ => None,
+        }
+    }
+}
+
+impl Value {
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::F64(v) => Some(*v as i64),
+            Self::I64(v) => Some(*v),
+            Self::Str(v) => v.parse().ok(),
+        }
+    }
+}
+
+fn coerce_f64(a: &Value) -> f64 {
+    match a {
+        Value::F64(v) => *v,
+        Value::I64(v) => *v as f64,
+        _ => panic!("Cannot coerce {a:?} to f64"),
+    }
+}
+
+fn coerce_i64(a: &Value) -> i64 {
+    match a {
+        Value::F64(v) => *v as i64,
+        Value::I64(v) => *v,
+        _ => panic!("Cannot coerce {a:?} to i64"),
+    }
+}
+
+fn coerce_str(a: &Value) -> String {
+    match a {
+        Value::F64(v) => v.to_string(),
+        Value::I64(v) => v.to_string(),
+        Value::Str(v) => v.clone(),
+    }
+}
+
+fn binary_op_str(
+    lhs: &Value,
+    rhs: &Value,
+    d: impl Fn(f64, f64) -> f64,
+    i: impl Fn(i64, i64) -> i64,
+    s: impl Fn(&str, &str) -> String,
+) -> Value {
+    match (lhs, rhs) {
+        (Value::F64(lhs), rhs) => Value::F64(d(*lhs, coerce_f64(rhs))),
+        (lhs, Value::F64(rhs)) => Value::F64(d(coerce_f64(lhs), *rhs)),
+        (Value::I64(lhs), Value::I64(rhs)) => Value::I64(i(*lhs, *rhs)),
+        (Value::Str(lhs), Value::Str(rhs)) => Value::Str(s(lhs, rhs)),
+        _ => {
+            panic!("Cannot perform operation on {lhs:?} and {rhs:?}");
+        }
+    }
+}
+
+impl std::ops::Add for Value {
+    type Output = Value;
+    fn add(self, rhs: Self) -> Self::Output {
+        binary_op_str(
+            &self,
+            &rhs,
+            |lhs, rhs| lhs + rhs,
+            |lhs, rhs| lhs + rhs,
+            |lhs, rhs| lhs.to_owned() + rhs,
+        )
+    }
+}
+
+impl std::ops::Sub for Value {
+    type Output = Value;
+    fn sub(self, rhs: Self) -> Self::Output {
+        binary_op_str(
+            &self,
+            &rhs,
+            |lhs, rhs| lhs - rhs,
+            |lhs, rhs| lhs - rhs,
+            |_, _| panic!("Strings cannot be subtracted"),
+        )
+    }
+}
+
+impl std::ops::Mul for Value {
+    type Output = Value;
+    fn mul(self, rhs: Self) -> Self::Output {
+        binary_op_str(
+            &self,
+            &rhs,
+            |lhs, rhs| lhs * rhs,
+            |lhs, rhs| lhs * rhs,
+            |_, _| panic!("Strings cannot be multiplied"),
+        )
+    }
+}
+
+impl std::ops::Div for Value {
+    type Output = Value;
+    fn div(self, rhs: Self) -> Self::Output {
+        binary_op_str(
+            &self,
+            &rhs,
+            |lhs, rhs| lhs / rhs,
+            |lhs, rhs| lhs / rhs,
+            |_, _| panic!("Strings cannot be divided"),
+        )
+    }
+}
+
 #[derive(Debug)]
 enum BreakResult {
-    Return(f64),
+    Return(Value),
     Break,
     Continue,
 }
 
-type EvalResult = ControlFlow<BreakResult, f64>;
+type EvalResult = ControlFlow<BreakResult, Value>;
 
 fn eval_stmts<'src>(stmts: &[Statement<'src>], frame: &mut StackFrame<'src>) -> EvalResult {
-    let mut last_result = EvalResult::Continue(0.);
+    let mut last_result = EvalResult::Continue(Value::I64(0));
     for statement in stmts {
         match statement {
             Statement::Expression(expr) => {
@@ -71,10 +205,12 @@ fn eval_stmts<'src>(stmts: &[Statement<'src>], frame: &mut StackFrame<'src>) -> 
                 end,
                 stmts,
             } => {
-                let start = eval(start, frame)? as isize;
-                let end = eval(end, frame)? as isize;
+                let start = eval(start, frame)?
+                    .as_i64()
+                    .expect("start must be an integer");
+                let end = eval(end, frame)?.as_i64().expect("end must be an integer");
                 for i in start..end {
-                    frame.vars.insert(loop_var.to_string(), i as f64);
+                    frame.vars.insert(loop_var.to_string(), Value::I64(i));
                     match eval_stmts(stmts, frame) {
                         EvalResult::Continue(val) => last_result = EvalResult::Continue(val),
                         EvalResult::Break(BreakResult::Return(val)) => {
@@ -106,9 +242,14 @@ fn eval_stmts<'src>(stmts: &[Statement<'src>], frame: &mut StackFrame<'src>) -> 
 fn eval<'src>(expr: &Expression<'src>, frame: &mut StackFrame<'src>) -> EvalResult {
     use Expression::*;
     let res = match expr {
-        Ident("pi") => std::f64::consts::PI,
-        Ident(id) => *frame.vars.get(*id).expect("Variable not found"),
-        NumLiteral(n) => *n,
+        Ident("pi") => Value::F64(std::f64::consts::PI),
+        Ident(id) => frame
+            .vars
+            .get(*id)
+            .cloned()
+            .unwrap_or_else(|| panic!("Variable not found: {id}")),
+        NumLiteral(n) => Value::F64(*n),
+        StrLiteral(s) => Value::Str(s.clone()),
         FnInvoke(name, args) => {
             let mut arg_vals = vec![];
             for arg in args.iter() {
@@ -127,25 +268,25 @@ fn eval<'src>(expr: &Expression<'src>, frame: &mut StackFrame<'src>) -> EvalResu
         Div(lhs, rhs) => eval(lhs, frame)? / eval(rhs, frame)?,
         Gt(lhs, rhs) => {
             if eval(lhs, frame)? > eval(rhs, frame)? {
-                1.
+                Value::I64(1)
             } else {
-                0.
+                Value::I64(0)
             }
         }
         Lt(lhs, rhs) => {
             if eval(lhs, frame)? < eval(rhs, frame)? {
-                1.
+                Value::I64(1)
             } else {
-                0.
+                Value::I64(0)
             }
         }
         If(cond, t_case, f_case) => {
-            if eval(cond, frame)? != 0. {
+            if coerce_i64(&eval(cond, frame)?) != 0 {
                 eval_stmts(t_case, frame)?
             } else if let Some(f_case) = f_case {
                 eval_stmts(f_case, frame)?
             } else {
-                0.
+                Value::I64(0)
             }
         }
     };
@@ -162,20 +303,20 @@ struct UserFn<'src> {
     stmts: Statements<'src>,
 }
 
-type NativeFnCode = Box<dyn Fn(&[f64]) -> f64>;
+type NativeFnCode = Box<dyn Fn(&[Value]) -> Value>;
 struct NativeFn {
     code: NativeFnCode,
 }
 
 impl<'src> FnDef<'src> {
-    fn call(&self, args: &[f64], frame: &StackFrame) -> f64 {
+    fn call(&self, args: &[Value], frame: &StackFrame) -> Value {
         match self {
             Self::User(user_fn) => {
                 let mut new_frame = StackFrame::push_stack(frame);
                 new_frame.vars = args
                     .iter()
                     .zip(user_fn.args.iter())
-                    .map(|(args, name)| (name.to_string(), *args))
+                    .map(|(arg, name)| (name.to_string(), arg.clone()))
                     .collect();
                 match eval_stmts(&user_fn.stmts, &mut new_frame) {
                     EvalResult::Continue(val) | EvalResult::Break(BreakResult::Return(val)) => val,
@@ -192,13 +333,26 @@ impl<'src> FnDef<'src> {
     }
 }
 
-type Variables = HashMap<String, f64>;
+type Variables = HashMap<String, Value>;
 type Functions<'src> = HashMap<String, FnDef<'src>>;
 
-fn print(arg: f64) -> f64 {
-    println!("print: {arg}");
-    0.
+fn print(args: &[Value]) -> Value {
+    println!("print: {}", args[0]);
+    Value::I64(0)
 }
+
+fn puts_fn(args: &[Value]) -> Value {
+    for arg in args {
+        println!("{}", arg);
+    }
+    Value::I64(0)
+}
+
+fn p_dgb(args: &[Value]) -> Value {
+    println!("dbg: {:?}", args[0]);
+    Value::I64(0)
+}
+
 struct StackFrame<'src> {
     vars: Variables,
     funcs: Functions<'src>,
@@ -220,7 +374,42 @@ impl<'src> StackFrame<'src> {
         funcs.insert("exp".to_string(), unary_fn(f64::exp));
         funcs.insert("log".to_string(), binary_fn(f64::log));
         funcs.insert("log10".to_string(), unary_fn(f64::log10));
-        funcs.insert("print".to_string(), unary_fn(print));
+        funcs.insert("print".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(print),
+            })
+        });
+        funcs.insert("puts".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(puts_fn),
+            })
+        });
+        funcs.insert("dbg".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(p_dgb),
+            })
+        });
+        funcs.insert("i64".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(move |args| {
+                    Value::I64(coerce_i64(args.first().expect("function missing argument")))
+                }),
+            })
+        });
+        funcs.insert("f64".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(move |args| {
+                    Value::F64(coerce_f64(args.first().expect("function missing argument")))
+                }),
+            })
+        });
+        funcs.insert("str".to_string(), {
+            FnDef::Native(NativeFn {
+                code: Box::new(move |args| {
+                    Value::Str(coerce_str(args.first().expect("function missing argument")))
+                }),
+            })
+        });
         Self {
             vars: Variables::new(),
             funcs,
@@ -249,10 +438,9 @@ impl<'src> StackFrame<'src> {
 fn unary_fn<'a>(f: fn(f64) -> f64) -> FnDef<'a> {
     FnDef::Native(NativeFn {
         code: Box::new(move |args| {
-            f(*args
-                .iter()
-                .next()
-                .expect("this function is missing an argument"))
+            Value::F64(f(coerce_f64(
+                args.iter().next().expect("function missing argument"),
+            )))
         }),
     })
 }
@@ -261,13 +449,15 @@ fn binary_fn<'a>(f: fn(f64, f64) -> f64) -> FnDef<'a> {
     FnDef::Native(NativeFn {
         code: Box::new(move |args| {
             let mut args = args.iter();
-            let lhs = args
-                .next()
-                .expect("this function is missing the first argument");
-            let rhs = args
-                .next()
-                .expect("this function is missing the second argument");
-            f(*lhs, *rhs)
+            let lhs = coerce_f64(
+                args.next()
+                    .expect("this function is missing the first argument"),
+            );
+            let rhs = coerce_f64(
+                args.next()
+                    .expect("this function is missing the second argument"),
+            );
+            Value::F64(f(lhs, rhs))
         }),
     })
 }
@@ -276,6 +466,7 @@ fn binary_fn<'a>(f: fn(f64, f64) -> f64) -> FnDef<'a> {
 enum Expression<'src> {
     Ident(&'src str),
     NumLiteral(f64),
+    StrLiteral(String),
     FnInvoke(&'src str, Vec<Expression<'src>>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -339,8 +530,8 @@ fn general_statement<'a>(last: bool) -> impl Fn(&'a str) -> IResult<&'a str, Sta
     };
     move |input| {
         alt((
-            var_def,
-            var_assign,
+            terminated(var_def, terminator),
+            terminated(var_assign, terminator),
             fn_def_statement,
             for_statement,
             terminated(return_statement, terminator),
@@ -416,7 +607,6 @@ fn var_def(i: &str) -> IResult<&str, Statement> {
     let (i, ident) = space_delimited(identifier)(i)?;
     let (i, _) = space_delimited(tag("="))(i)?;
     let (i, expr) = space_delimited(expr)(i)?;
-    let (i, _) = space_delimited(char(';'))(i)?;
     Ok((i, Statement::VarDef(ident, expr)))
 }
 
@@ -424,7 +614,6 @@ fn var_assign(i: &str) -> IResult<&str, Statement> {
     let (i, ident) = space_delimited(identifier)(i)?;
     let (i, _) = space_delimited(tag("="))(i)?;
     let (i, expr) = space_delimited(expr)(i)?;
-    let (i, _) = space_delimited(char(';'))(i)?;
     Ok((i, Statement::VarAssign(ident, expr)))
 }
 
@@ -442,7 +631,15 @@ fn if_expr(i: &str) -> IResult<&str, Expression> {
     let (i, t_case) = delimited(open_brace, statements, close_brace)(i)?;
     let (i, f_case) = opt(preceded(
         space_delimited(tag("else")),
-        delimited(open_brace, statements, close_brace),
+        alt((
+            delimited(open_brace, statements, close_brace),
+            map_res(
+                if_expr,
+                |v| -> Result<Vec<Statement>, nom::error::Error<&str>> {
+                    Ok(vec![Statement::Expression(v)])
+                },
+            ),
+        )),
     ))(i)?;
     Ok((
         i,
@@ -479,7 +676,7 @@ fn term(i: &str) -> IResult<&str, Expression> {
 }
 
 fn factor(i: &str) -> IResult<&str, Expression> {
-    alt((number, func_call, ident, parens))(i)
+    alt((str_literal, num_literal, func_call, ident, parens))(i)
 }
 
 fn func_call(i: &str) -> IResult<&str, Expression> {
@@ -513,7 +710,7 @@ fn identifier(input: &str) -> IResult<&str, &str> {
     ))(input)
 }
 
-fn number(input: &str) -> IResult<&str, Expression> {
+fn num_literal(input: &str) -> IResult<&str, Expression> {
     let (r, v) = space_delimited(recognize_float)(input)?;
     Ok((
         r,
@@ -523,6 +720,21 @@ fn number(input: &str) -> IResult<&str, Expression> {
                 code: nom::error::ErrorKind::Digit,
             })
         })?),
+    ))
+}
+
+fn str_literal(i: &str) -> IResult<&str, Expression> {
+    let (r0, _) = preceded(multispace0, char('"'))(i)?;
+    let (r, val) = many0(none_of("\""))(r0)?;
+    let (r, _) = terminated(char('"'), multispace0)(r)?;
+    Ok((
+        r,
+        Expression::StrLiteral(
+            val.iter()
+                .collect::<String>()
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n"),
+        ),
     ))
 }
 
