@@ -218,7 +218,7 @@ fn tc_coerce_type(value: &TypeDecl, target: &TypeDecl) -> Result<TypeDecl, TypeC
 
 pub struct TypeCheckContext<'src> {
     vars: HashMap<&'src str, TypeDecl>,
-    funcs: HashMap<String, FnDef<'src>>,
+    funcs: Functions<'src>,
     super_context: Option<&'src TypeCheckContext<'src>>,
 }
 
@@ -232,7 +232,7 @@ impl<'src> TypeCheckContext<'src> {
     pub fn new() -> Self {
         Self {
             vars: HashMap::new(),
-            funcs: HashMap::new(),
+            funcs: standard_functions(),
             super_context: None,
         }
     }
@@ -641,63 +641,9 @@ struct StackFrame<'src> {
 
 impl<'src> StackFrame<'src> {
     fn new() -> Self {
-        let mut funcs = Functions::new();
-        funcs.insert("sqrt".to_string(), unary_fn(f64::sqrt));
-        funcs.insert("sin".to_string(), unary_fn(f64::sin));
-        funcs.insert("cos".to_string(), unary_fn(f64::cos));
-        funcs.insert("tan".to_string(), unary_fn(f64::tan));
-        funcs.insert("asin".to_string(), unary_fn(f64::asin));
-        funcs.insert("acos".to_string(), unary_fn(f64::acos));
-        funcs.insert("atan".to_string(), unary_fn(f64::atan));
-        funcs.insert("atan2".to_string(), binary_fn(f64::atan2));
-        funcs.insert("pow".to_string(), binary_fn(f64::powf));
-        funcs.insert("exp".to_string(), unary_fn(f64::exp));
-        funcs.insert("log".to_string(), binary_fn(f64::log));
-        funcs.insert("log10".to_string(), unary_fn(f64::log10));
-        funcs.insert("print".to_string(), {
-            FnDef::Native(NativeFn {
-                args: vec![("arg", TypeDecl::Any)],
-                ret_type: TypeDecl::Any,
-                code: Box::new(print),
-            })
-        });
-        funcs.insert("dbg".to_string(), {
-            FnDef::Native(NativeFn {
-                args: vec![("arg", TypeDecl::Any)],
-                ret_type: TypeDecl::Any,
-                code: Box::new(p_dgb),
-            })
-        });
-        funcs.insert("i64".to_string(), {
-            FnDef::Native(NativeFn {
-                args: vec![("arg", TypeDecl::Any)],
-                ret_type: TypeDecl::I64,
-                code: Box::new(move |args| {
-                    Value::I64(coerce_i64(args.first().expect("function missing argument")))
-                }),
-            })
-        });
-        funcs.insert("f64".to_string(), {
-            FnDef::Native(NativeFn {
-                args: vec![("arg", TypeDecl::Any)],
-                ret_type: TypeDecl::F64,
-                code: Box::new(move |args| {
-                    Value::F64(coerce_f64(args.first().expect("function missing argument")))
-                }),
-            })
-        });
-        funcs.insert("str".to_string(), {
-            FnDef::Native(NativeFn {
-                args: vec![("arg", TypeDecl::Any)],
-                ret_type: TypeDecl::Str,
-                code: Box::new(move |args| {
-                    Value::Str(coerce_str(args.first().expect("function missing argument")))
-                }),
-            })
-        });
         Self {
             vars: Variables::new(),
-            funcs,
+            funcs: standard_functions(),
             uplevel: None,
         }
     }
@@ -718,6 +664,64 @@ impl<'src> StackFrame<'src> {
             uplevel: Some(uplevel),
         }
     }
+}
+
+fn standard_functions<'src>() -> Functions<'src> {
+    let mut funcs = Functions::new();
+    funcs.insert("sqrt".to_string(), unary_fn(f64::sqrt));
+    funcs.insert("sin".to_string(), unary_fn(f64::sin));
+    funcs.insert("cos".to_string(), unary_fn(f64::cos));
+    funcs.insert("tan".to_string(), unary_fn(f64::tan));
+    funcs.insert("asin".to_string(), unary_fn(f64::asin));
+    funcs.insert("acos".to_string(), unary_fn(f64::acos));
+    funcs.insert("atan".to_string(), unary_fn(f64::atan));
+    funcs.insert("atan2".to_string(), binary_fn(f64::atan2));
+    funcs.insert("pow".to_string(), binary_fn(f64::powf));
+    funcs.insert("exp".to_string(), unary_fn(f64::exp));
+    funcs.insert("log".to_string(), binary_fn(f64::log));
+    funcs.insert("log10".to_string(), unary_fn(f64::log10));
+    funcs.insert("print".to_string(), {
+        FnDef::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::Any,
+            code: Box::new(print),
+        })
+    });
+    funcs.insert("dbg".to_string(), {
+        FnDef::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::Any,
+            code: Box::new(p_dgb),
+        })
+    });
+    funcs.insert("i64".to_string(), {
+        FnDef::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::I64,
+            code: Box::new(move |args| {
+                Value::I64(coerce_i64(args.first().expect("function missing argument")))
+            }),
+        })
+    });
+    funcs.insert("f64".to_string(), {
+        FnDef::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::F64,
+            code: Box::new(move |args| {
+                Value::F64(coerce_f64(args.first().expect("function missing argument")))
+            }),
+        })
+    });
+    funcs.insert("str".to_string(), {
+        FnDef::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::Str,
+            code: Box::new(move |args| {
+                Value::Str(coerce_str(args.first().expect("function missing argument")))
+            }),
+        })
+    });
+    funcs
 }
 
 fn unary_fn<'a>(f: fn(f64) -> f64) -> FnDef<'a> {
