@@ -112,7 +112,7 @@ fn coerce_str(a: &Value) -> String {
     }
 }
 
-fn binary_op_str(
+pub(crate) fn binary_op_str(
     lhs: &Value,
     rhs: &Value,
     d: impl Fn(f64, f64) -> f64,
@@ -945,7 +945,7 @@ pub(crate) fn last_statement(i: Span) -> IResult<Span, Statement> {
     general_statement(true)(i)
 }
 
-fn statement(i: Span) -> IResult<Span, Statement> {
+pub(crate) fn statement(i: Span) -> IResult<Span, Statement> {
     general_statement(false)(i)
 }
 
