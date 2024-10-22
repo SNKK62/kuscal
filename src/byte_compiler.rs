@@ -1,25 +1,33 @@
 use std::io::{BufReader, BufWriter, Read, Write};
+mod simple_parser;
+use ruscal::{parse_args, RunMode};
+use simple_parser::{expr, Expression};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum OpCode {
     LoadLiteral,
+    Copy,
     Add,
 }
 
-impl From<u8> for OpCode {
-    #[allow(non_upper_case_globals)]
-    fn from(o: u8) -> Self {
-        const LoadLiteral: u8 = OpCode::LoadLiteral as u8;
-        const Add: u8 = OpCode::Add as u8;
+macro_rules! impl_op_from {
+    ($($op:ident),*) => {
+        impl From<u8> for OpCode {
+            #[allow(non_upper_case_globals)]
+            fn from(o: u8) -> Self {
+                $(const $op: u8 = OpCode::$op as u8;)*
 
-        match o {
-            LoadLiteral => OpCode::LoadLiteral,
-            Add => OpCode::Add,
-            _ => panic!("Opcode \"{:02X}\" unrecognized!", o),
+                match o {
+                    $($op => Self::$op,)*
+                    _ => panic!("Opcode \"{:02X}\" unrecognized!", o),
+                }
+            }
         }
     }
 }
+
+impl_op_from!(LoadLiteral, Copy, Add);
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -56,8 +64,9 @@ fn deserialize_size(reader: &mut impl Read) -> std::io::Result<usize> {
 }
 
 struct Compiler {
-    literals: Vec<i64>,
+    literals: Vec<f64>,
     instructions: Vec<Instruction>,
+    target_stack: Vec<usize>,
 }
 
 impl Compiler {
@@ -65,17 +74,30 @@ impl Compiler {
         Self {
             literals: vec![],
             instructions: vec![],
+            target_stack: vec![],
         }
     }
 
-    fn add_literal(&mut self, value: i64) -> u8 {
+    fn add_literal(&mut self, value: f64) -> u8 {
         let ret = self.literals.len();
         self.literals.push(value);
         ret as u8
     }
 
-    fn add_inst(&mut self, op: OpCode, arg0: u8) {
+    // return the absolute position of inserted value
+    fn add_inst(&mut self, op: OpCode, arg0: u8) -> usize {
+        let inst = self.instructions.len();
         self.instructions.push(Instruction { op, arg0 });
+        inst
+    }
+
+    fn add_copy_inst(&mut self, stack_idx: usize) -> usize {
+        let inst = self.add_inst(
+            OpCode::Copy,
+            (self.target_stack.len() - stack_idx - 1) as u8,
+        );
+        self.target_stack.push(0);
+        inst
     }
 
     fn write_literals(&self, writer: &mut impl Write) -> std::io::Result<()> {
@@ -93,26 +115,87 @@ impl Compiler {
         }
         Ok(())
     }
+
+    fn compile_expr(&mut self, ex: &Expression) -> usize {
+        match ex {
+            Expression::NumLiteral(num) => {
+                let id = self.add_literal(*num);
+                self.add_inst(OpCode::LoadLiteral, id);
+                self.target_stack.push(id as usize);
+                self.target_stack.len() - 1
+            }
+            Expression::Ident("pi") => {
+                let id = self.add_literal(std::f64::consts::PI);
+                self.add_inst(OpCode::LoadLiteral, id);
+                self.target_stack.push(id as usize);
+                self.target_stack.len() - 1
+            }
+            Expression::Ident(id) => {
+                panic!("Unknown identifier {id:?}");
+            }
+            Expression::Add(lhs, rhs) => {
+                let lhs = self.compile_expr(lhs);
+                let rhs = self.compile_expr(rhs);
+                self.add_copy_inst(lhs);
+                self.add_copy_inst(rhs);
+                self.target_stack.pop();
+                self.add_inst(OpCode::Add, 0);
+                self.target_stack.len() - 1
+            }
+        }
+    }
+
+    fn disasm(&self, writer: &mut impl Write) -> std::io::Result<()> {
+        use OpCode::*;
+        writeln!(writer, "Literals [{}]", self.literals.len())?;
+        for (i, con) in self.literals.iter().enumerate() {
+            writeln!(writer, " [{i}] {}", *con)?;
+        }
+
+        writeln!(writer, "Instructions [{}]", self.instructions.len())?;
+        for (i, inst) in self.instructions.iter().enumerate() {
+            match inst.op {
+                LoadLiteral => writeln!(
+                    writer,
+                    " [{i}] {:?} {} ({:?})",
+                    inst.op, inst.arg0, self.literals[inst.arg0 as usize]
+                )?,
+                Copy => writeln!(writer, " [{i}] {:?} {}", inst.op, inst.arg0)?,
+                Add => writeln!(writer, " [{i}] Add")?,
+            }
+        }
+        Ok(())
+    }
 }
 
-fn write_program(file: &str) -> std::io::Result<()> {
+fn write_program(
+    source: &str,
+    writer: &mut impl Write,
+    out_file: &str,
+    disasm: bool,
+) -> std::io::Result<()> {
     let mut compiler = Compiler::new();
-    let arg = compiler.add_literal(512);
-    compiler.add_inst(OpCode::LoadLiteral, arg);
-    let arg = compiler.add_literal(1024);
-    compiler.add_inst(OpCode::LoadLiteral, arg);
-    compiler.add_inst(OpCode::Add, 0);
+    let (_, ex) =
+        expr(source).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_owned()))?;
 
-    let writer = std::fs::File::create(file)?;
-    let mut writer = BufWriter::new(writer);
-    compiler.write_literals(&mut writer).unwrap();
-    compiler.write_insts(&mut writer).unwrap();
-    println!("Written {} instructions", compiler.instructions.len());
+    compiler.compile_expr(&ex);
+
+    if disasm {
+        compiler.disasm(&mut std::io::stdout())?;
+    }
+
+    compiler.write_literals(writer).unwrap();
+    compiler.write_insts(writer).unwrap();
+    println!(
+        "Writeen {} literals and {} instructions to {out_file:?}",
+        compiler.literals.len(),
+        compiler.instructions.len()
+    );
     Ok(())
 }
 
 struct ByteCode {
-    literals: Vec<i64>,
+    literals: Vec<f64>,
     instructions: Vec<Instruction>,
 }
 
@@ -129,7 +212,7 @@ impl ByteCode {
         for _ in 0..num_literals {
             let mut buf = [0u8; std::mem::size_of::<i64>()];
             reader.read_exact(&mut buf)?;
-            self.literals.push(i64::from_le_bytes(buf));
+            self.literals.push(f64::from_le_bytes(buf));
         }
         Ok(())
     }
@@ -143,13 +226,16 @@ impl ByteCode {
         Ok(())
     }
 
-    fn interpret(&self) -> Option<i64> {
+    fn interpret(&self) -> Option<f64> {
         let mut stack = vec![];
 
         for instruction in &self.instructions {
             match instruction.op {
                 OpCode::LoadLiteral => {
                     stack.push(self.literals[instruction.arg0 as usize]);
+                }
+                OpCode::Copy => {
+                    stack.push(stack[stack.len() - instruction.arg0 as usize - 1]);
                 }
                 OpCode::Add => {
                     let rhs = stack.pop().expect("Stack underflow");
@@ -163,26 +249,52 @@ impl ByteCode {
     }
 }
 
-fn read_program(file: &str) -> std::io::Result<ByteCode> {
-    let reader = std::fs::File::open(file)?;
-    let mut reader = BufReader::new(reader);
+fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
     let mut bytecode = ByteCode::new();
-    bytecode.read_literals(&mut reader)?;
-    bytecode.read_instructions(&mut reader)?;
+    bytecode.read_literals(reader)?;
+    bytecode.read_instructions(reader)?;
     Ok(bytecode)
 }
 
-fn main() {
-    let mut args = std::env::args();
-    args.next();
-    match args.next().as_ref().map(|s| s as &str) {
-        Some("w") => write_program("bytecode.bin").unwrap(),
-        Some("r") => {
-            if let Ok(bytecode) = read_program("bytecode.bin") {
+fn main() -> std::io::Result<()> {
+    let Some(args) = parse_args(true) else {
+        return Ok(());
+    };
+
+    match args.run_mode {
+        RunMode::Compile => {
+            if let Some(expr) = args.source {
+                let writer = std::fs::File::create(&args.output)?;
+                let mut writer = BufWriter::new(writer);
+                write_program(&expr, &mut writer, &args.output, args.disasm)?;
+            }
+        }
+        RunMode::Run(code_file) => {
+            let reader = std::fs::File::open(&code_file)?;
+            let mut reader = BufReader::new(reader);
+            match read_program(&mut reader) {
+                Ok(bytecode) => {
+                    let result = bytecode.interpret();
+                    println!("result: {result:?}");
+                }
+                Err(e) => eprintln!("Read program error: {e:?}"),
+            }
+        }
+        RunMode::CompileAndRun => {
+            if let Some(expr) = args.source {
+                let mut buf = vec![];
+                write_program(
+                    &expr,
+                    &mut std::io::Cursor::new(&mut buf),
+                    "<Memory>",
+                    args.disasm,
+                )?;
+                let bytecode = read_program(&mut std::io::Cursor::new(&mut buf))?;
                 let result = bytecode.interpret();
                 println!("result: {result:?}");
             }
         }
-        _ => println!("Please specify w or r as an argument"),
+        _ => println!("Please specify -c or -r as an argument"),
     }
+    Ok(())
 }
