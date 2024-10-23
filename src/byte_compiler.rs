@@ -1,6 +1,9 @@
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::{
+    fmt::Display,
+    io::{BufReader, BufWriter, Read, Write},
+};
 mod simple_parser;
-use ruscal::{parse_args, RunMode};
+use ruscal::{dprintln, parse_args, RunMode};
 use simple_parser::{expr, Expression};
 
 #[derive(Debug, Clone, Copy)]
@@ -9,6 +12,10 @@ pub enum OpCode {
     LoadLiteral,
     Copy,
     Add,
+    Sub,
+    Mul,
+    Div,
+    Call,
 }
 
 macro_rules! impl_op_from {
@@ -27,7 +34,7 @@ macro_rules! impl_op_from {
     }
 }
 
-impl_op_from!(LoadLiteral, Copy, Add);
+impl_op_from!(LoadLiteral, Copy, Add, Sub, Mul, Div, Call);
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -63,8 +70,94 @@ fn deserialize_size(reader: &mut impl Read) -> std::io::Result<usize> {
     Ok(u32::from_le_bytes(buf) as usize)
 }
 
+fn serialize_str(s: &str, writer: &mut impl Write) -> std::io::Result<()> {
+    serialize_size(s.len(), writer)?;
+    writer.write_all(s.as_bytes())?;
+    Ok(())
+}
+
+fn deserialize_str(reader: &mut impl Read) -> std::io::Result<String> {
+    let mut buf = vec![0u8; deserialize_size(reader)?];
+    reader.read_exact(&mut buf)?;
+    let s = String::from_utf8(buf).unwrap();
+    Ok(s)
+}
+
+#[repr(u8)]
+enum ValueKind {
+    F64,
+    Str,
+}
+
+#[derive(Debug, Clone)]
+enum Value {
+    F64(f64),
+    Str(String),
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F64(value) => write!(f, "{value}"),
+            Self::Str(value) => write!(f, "{value:?}"),
+        }
+    }
+}
+
+impl Value {
+    fn kind(&self) -> ValueKind {
+        match self {
+            Self::F64(_) => ValueKind::F64,
+            Self::Str(_) => ValueKind::Str,
+        }
+    }
+
+    fn serialize(&self, writer: &mut impl Write) -> std::io::Result<()> {
+        let kind = self.kind() as u8;
+        writer.write_all(&[kind])?;
+        match self {
+            Self::F64(value) => {
+                writer.write_all(&value.to_le_bytes())?;
+            }
+            Self::Str(value) => serialize_str(value, writer)?,
+        };
+        Ok(())
+    }
+
+    #[allow(non_upper_case_globals)]
+    fn deserialize(reader: &mut impl Read) -> std::io::Result<Self> {
+        const F64: u8 = ValueKind::F64 as u8;
+        const Str: u8 = ValueKind::Str as u8;
+
+        let mut kind_buf = [0u8; 1];
+        reader.read_exact(&mut kind_buf)?;
+        match kind_buf[0] {
+            F64 => {
+                let mut buf = [0u8; std::mem::size_of::<f64>()];
+                reader.read_exact(&mut buf)?;
+                Ok(Value::F64(f64::from_le_bytes(buf)))
+            }
+            Str => Ok(Value::Str(deserialize_str(reader)?)),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "ValueKind {} does not match to any known kinds",
+                    kind_buf[0]
+                ),
+            )),
+        }
+    }
+
+    fn coerce_f64(&self) -> f64 {
+        match self {
+            Self::F64(value) => *value,
+            _ => panic!("Coercion failed: {:?} cannot be coerced to f64", self),
+        }
+    }
+}
+
 struct Compiler {
-    literals: Vec<f64>,
+    literals: Vec<Value>,
     instructions: Vec<Instruction>,
     target_stack: Vec<usize>,
 }
@@ -78,7 +171,7 @@ impl Compiler {
         }
     }
 
-    fn add_literal(&mut self, value: f64) -> u8 {
+    fn add_literal(&mut self, value: Value) -> u8 {
         let ret = self.literals.len();
         self.literals.push(value);
         ret as u8
@@ -103,7 +196,7 @@ impl Compiler {
     fn write_literals(&self, writer: &mut impl Write) -> std::io::Result<()> {
         serialize_size(self.literals.len(), writer)?;
         for value in &self.literals {
-            writer.write_all(&value.to_le_bytes())?;
+            value.serialize(writer)?;
         }
         Ok(())
     }
@@ -119,13 +212,13 @@ impl Compiler {
     fn compile_expr(&mut self, ex: &Expression) -> usize {
         match ex {
             Expression::NumLiteral(num) => {
-                let id = self.add_literal(*num);
+                let id = self.add_literal(Value::F64(*num));
                 self.add_inst(OpCode::LoadLiteral, id);
                 self.target_stack.push(id as usize);
                 self.target_stack.len() - 1
             }
             Expression::Ident("pi") => {
-                let id = self.add_literal(std::f64::consts::PI);
+                let id = self.add_literal(Value::F64(std::f64::consts::PI));
                 self.add_inst(OpCode::LoadLiteral, id);
                 self.target_stack.push(id as usize);
                 self.target_stack.len() - 1
@@ -133,16 +226,40 @@ impl Compiler {
             Expression::Ident(id) => {
                 panic!("Unknown identifier {id:?}");
             }
-            Expression::Add(lhs, rhs) => {
-                let lhs = self.compile_expr(lhs);
-                let rhs = self.compile_expr(rhs);
-                self.add_copy_inst(lhs);
-                self.add_copy_inst(rhs);
-                self.target_stack.pop();
-                self.add_inst(OpCode::Add, 0);
+            Expression::Add(lhs, rhs) => self.bin_op(OpCode::Add, lhs, rhs),
+            Expression::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs),
+            Expression::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs),
+            Expression::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs),
+            Expression::FnInvoke(name, args) => {
+                let name = self.add_literal(Value::Str(name.to_string()));
+                let args = args
+                    .iter()
+                    .map(|arg| self.compile_expr(arg))
+                    .collect::<Vec<_>>();
+                self.add_inst(OpCode::LoadLiteral, name);
+                self.target_stack.push(0);
+                for arg in &args {
+                    self.add_copy_inst(*arg);
+                }
+
+                self.add_inst(OpCode::Call, args.len() as u8);
+                self.target_stack
+                    .resize(self.target_stack.len() - args.len(), 0);
                 self.target_stack.len() - 1
             }
         }
+    }
+
+    fn bin_op(&mut self, op: OpCode, lhs: &Expression, rhs: &Expression) -> usize {
+        let lhs = self.compile_expr(lhs);
+        let rhs = self.compile_expr(rhs);
+        self.add_copy_inst(lhs);
+        self.add_copy_inst(rhs);
+        self.add_inst(op, 0);
+        self.target_stack.pop();
+        self.target_stack.pop();
+        self.target_stack.push(usize::MAX);
+        self.target_stack.len() - 1
     }
 
     fn disasm(&self, writer: &mut impl Write) -> std::io::Result<()> {
@@ -160,8 +277,8 @@ impl Compiler {
                     " [{i}] {:?} {} ({:?})",
                     inst.op, inst.arg0, self.literals[inst.arg0 as usize]
                 )?,
-                Copy => writeln!(writer, " [{i}] {:?} {}", inst.op, inst.arg0)?,
-                Add => writeln!(writer, " [{i}] Add")?,
+                Copy | Call => writeln!(writer, " [{i}] {:?} {}", inst.op, inst.arg0)?,
+                _ => writeln!(writer, " [{i}] {:?}", inst.op)?,
             }
         }
         Ok(())
@@ -195,7 +312,7 @@ fn write_program(
 }
 
 struct ByteCode {
-    literals: Vec<f64>,
+    literals: Vec<Value>,
     instructions: Vec<Instruction>,
 }
 
@@ -210,9 +327,7 @@ impl ByteCode {
     fn read_literals(&mut self, reader: &mut impl Read) -> std::io::Result<()> {
         let num_literals = deserialize_size(reader)?;
         for _ in 0..num_literals {
-            let mut buf = [0u8; std::mem::size_of::<i64>()];
-            reader.read_exact(&mut buf)?;
-            self.literals.push(f64::from_le_bytes(buf));
+            self.literals.push(Value::deserialize(reader)?);
         }
         Ok(())
     }
@@ -226,26 +341,79 @@ impl ByteCode {
         Ok(())
     }
 
-    fn interpret(&self) -> Option<f64> {
+    fn interpret(&self) -> Option<Value> {
         let mut stack = vec![];
 
-        for instruction in &self.instructions {
+        for (ip, instruction) in self.instructions.iter().enumerate() {
+            dprintln!("interpret[{ip}]: {instruction:?} stack: {stack:?}");
             match instruction.op {
                 OpCode::LoadLiteral => {
-                    stack.push(self.literals[instruction.arg0 as usize]);
+                    stack.push(self.literals[instruction.arg0 as usize].clone());
                 }
                 OpCode::Copy => {
-                    stack.push(stack[stack.len() - instruction.arg0 as usize - 1]);
+                    stack.push(stack[stack.len() - instruction.arg0 as usize - 1].clone());
                 }
-                OpCode::Add => {
-                    let rhs = stack.pop().expect("Stack underflow");
-                    let lhs = stack.pop().expect("Stack underflow");
-                    stack.push(lhs + rhs);
+                OpCode::Add => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs + rhs),
+                OpCode::Sub => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs - rhs),
+                OpCode::Mul => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs * rhs),
+                OpCode::Div => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs / rhs),
+                OpCode::Call => {
+                    let args = &stack[stack.len() - instruction.arg0 as usize..];
+                    let fname = &stack[stack.len() - instruction.arg0 as usize - 1];
+                    let Value::Str(fname) = fname else {
+                        panic!("Function name shall be a string: {fname:?}");
+                    };
+                    let res = match fname as &str {
+                        "sqrt" => unary_fn(f64::sqrt)(args),
+                        "sin" => unary_fn(f64::sin)(args),
+                        "cos" => unary_fn(f64::cos)(args),
+                        "tan" => unary_fn(f64::tan)(args),
+                        "asin" => unary_fn(f64::asin)(args),
+                        "acos" => unary_fn(f64::acos)(args),
+                        "atan" => unary_fn(f64::atan)(args),
+                        "atan2" => binary_fn(f64::atan2)(args),
+                        "pow" => binary_fn(f64::powf)(args),
+                        "exp" => unary_fn(f64::exp)(args),
+                        "log" => binary_fn(f64::log)(args),
+                        "log10" => unary_fn(f64::log10)(args),
+                        _ => panic!("Unknown function name {fname:?}"),
+                    };
+                    stack.resize(stack.len() - instruction.arg0 as usize - 1, Value::F64(0.));
+                    stack.push(res);
                 }
             }
         }
 
         stack.pop()
+    }
+
+    fn interpret_bin_op(&self, stack: &mut Vec<Value>, op: impl FnOnce(f64, f64) -> f64) {
+        let rhs = stack.pop().expect("Stack underflow").coerce_f64();
+        let lhs = stack.pop().expect("Stack underflow").coerce_f64();
+        stack.push(Value::F64(op(lhs, rhs)));
+    }
+}
+
+fn unary_fn(f: fn(f64) -> f64) -> impl Fn(&[Value]) -> Value {
+    move |args| {
+        let arg = args.first().expect("functino missing argument");
+        let ret = f(arg.coerce_f64());
+        Value::F64(ret)
+    }
+}
+
+fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(&[Value]) -> Value {
+    move |args| {
+        let mut args = args.iter();
+        let lhs = args
+            .next()
+            .expect("function missing the first argument")
+            .coerce_f64();
+        let rhs = args
+            .next()
+            .expect("function missing the second argument")
+            .coerce_f64();
+        Value::F64(f(lhs, rhs))
     }
 }
 
