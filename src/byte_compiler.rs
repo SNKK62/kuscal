@@ -10,12 +10,17 @@ use simple_parser::{expr, Expression};
 #[repr(u8)]
 pub enum OpCode {
     LoadLiteral,
+    Store,
     Copy,
     Add,
     Sub,
     Mul,
     Div,
     Call,
+    Jmp,
+    Jf, // Jump if false
+    Lt,
+    Pop, // Pop n values from the stack where n is given by arg0
 }
 
 macro_rules! impl_op_from {
@@ -34,7 +39,20 @@ macro_rules! impl_op_from {
     }
 }
 
-impl_op_from!(LoadLiteral, Copy, Add, Sub, Mul, Div, Call);
+impl_op_from!(
+    LoadLiteral,
+    Store,
+    Copy,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Call,
+    Jmp,
+    Jf,
+    Lt,
+    Pop
+);
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -89,10 +107,16 @@ enum ValueKind {
     Str,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Value {
     F64(f64),
     Str(String),
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::F64(0.)
+    }
 }
 
 impl Display for Value {
@@ -156,6 +180,14 @@ impl Value {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Absolute Stack Index
+struct StkIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Instruction Pointer
+struct InstPtr(usize); // ip
+
 struct Compiler {
     literals: Vec<Value>,
     instructions: Vec<Instruction>,
@@ -171,26 +203,72 @@ impl Compiler {
         }
     }
 
+    fn stack_top(&self) -> StkIdx {
+        StkIdx(self.target_stack.len() - 1)
+    }
+
     fn add_literal(&mut self, value: Value) -> u8 {
-        let ret = self.literals.len();
-        self.literals.push(value);
-        ret as u8
+        let existing = self
+            .literals
+            .iter()
+            .enumerate()
+            .find(|(_, val)| **val == value);
+        if let Some((i, _)) = existing {
+            i as u8
+        } else {
+            let ret = self.literals.len();
+            self.literals.push(value);
+            ret as u8
+        }
     }
 
     // return the absolute position of inserted value
-    fn add_inst(&mut self, op: OpCode, arg0: u8) -> usize {
+    fn add_inst(&mut self, op: OpCode, arg0: u8) -> InstPtr {
         let inst = self.instructions.len();
         self.instructions.push(Instruction { op, arg0 });
-        inst
+        InstPtr(inst)
     }
 
-    fn add_copy_inst(&mut self, stack_idx: usize) -> usize {
+    fn add_copy_inst(&mut self, stack_idx: StkIdx) -> InstPtr {
         let inst = self.add_inst(
             OpCode::Copy,
-            (self.target_stack.len() - stack_idx - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u8,
         );
         self.target_stack.push(0);
         inst
+    }
+
+    fn add_store_inst(&mut self, stack_idx: StkIdx) -> InstPtr {
+        let inst = self.add_inst(
+            OpCode::Store,
+            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+        );
+        self.target_stack.pop();
+        inst
+    }
+
+    fn add_jf_inst(&mut self) -> InstPtr {
+        // push with jump address 0, because it will be set later
+        let inst = self.add_inst(OpCode::Jf, 0);
+        self.target_stack.pop();
+        inst
+    }
+
+    fn fixup_jmp(&mut self, ip: InstPtr) {
+        self.instructions[ip.0].arg0 = self.instructions.len() as u8;
+    }
+
+    /// Pop until given stack index
+    fn add_pop_until_inst(&mut self, stack_idx: StkIdx) -> Option<InstPtr> {
+        if self.target_stack.len() <= stack_idx.0 {
+            return None;
+        }
+        let inst = self.add_inst(
+            OpCode::Pop,
+            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+        );
+        self.target_stack.resize(stack_idx.0 + 1, 0);
+        Some(inst)
     }
 
     fn write_literals(&self, writer: &mut impl Write) -> std::io::Result<()> {
@@ -209,19 +287,19 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_expr(&mut self, ex: &Expression) -> usize {
+    fn compile_expr(&mut self, ex: &Expression) -> StkIdx {
         match ex {
             Expression::NumLiteral(num) => {
                 let id = self.add_literal(Value::F64(*num));
                 self.add_inst(OpCode::LoadLiteral, id);
                 self.target_stack.push(id as usize);
-                self.target_stack.len() - 1
+                self.stack_top()
             }
             Expression::Ident("pi") => {
                 let id = self.add_literal(Value::F64(std::f64::consts::PI));
                 self.add_inst(OpCode::LoadLiteral, id);
                 self.target_stack.push(id as usize);
-                self.target_stack.len() - 1
+                self.stack_top()
             }
             Expression::Ident(id) => {
                 panic!("Unknown identifier {id:?}");
@@ -230,6 +308,8 @@ impl Compiler {
             Expression::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs),
             Expression::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs),
             Expression::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs),
+            Expression::Gt(lhs, rhs) => self.bin_op(OpCode::Lt, rhs, lhs),
+            Expression::Lt(lhs, rhs) => self.bin_op(OpCode::Lt, lhs, rhs),
             Expression::FnInvoke(name, args) => {
                 let name = self.add_literal(Value::Str(name.to_string()));
                 let args = args
@@ -245,12 +325,29 @@ impl Compiler {
                 self.add_inst(OpCode::Call, args.len() as u8);
                 self.target_stack
                     .resize(self.target_stack.len() - args.len(), 0);
-                self.target_stack.len() - 1
+                self.stack_top()
+            }
+            Expression::If(cond, true_branch, false_branch) => {
+                let cond = self.compile_expr(cond);
+                self.add_copy_inst(cond);
+                let jf_inst = self.add_jf_inst();
+                let stack_size_before = self.target_stack.len();
+                self.compile_expr(true_branch);
+                self.coerce_stack(StkIdx(stack_size_before + 1));
+                let jmp_inst = self.add_inst(OpCode::Jmp, 0);
+                self.fixup_jmp(jf_inst);
+                self.target_stack.resize(stack_size_before, 0);
+                if let Some(false_branch) = false_branch.as_ref() {
+                    self.compile_expr(false_branch);
+                }
+                self.coerce_stack(StkIdx(stack_size_before + 1));
+                self.fixup_jmp(jmp_inst);
+                self.stack_top()
             }
         }
     }
 
-    fn bin_op(&mut self, op: OpCode, lhs: &Expression, rhs: &Expression) -> usize {
+    fn bin_op(&mut self, op: OpCode, lhs: &Expression, rhs: &Expression) -> StkIdx {
         let lhs = self.compile_expr(lhs);
         let rhs = self.compile_expr(rhs);
         self.add_copy_inst(lhs);
@@ -259,7 +356,22 @@ impl Compiler {
         self.target_stack.pop();
         self.target_stack.pop();
         self.target_stack.push(usize::MAX);
-        self.target_stack.len() - 1
+        self.stack_top()
+    }
+
+    fn coerce_stack(&mut self, target: StkIdx) {
+        match target {
+            StkIdx(val) if val < self.target_stack.len() - 1 => {
+                self.add_store_inst(target);
+                self.add_pop_until_inst(target);
+            }
+            StkIdx(val) if self.target_stack.len() - 1 < val => {
+                for _ in self.target_stack.len() - 1..val {
+                    self.add_copy_inst(self.stack_top());
+                }
+            }
+            _ => {}
+        }
     }
 
     fn disasm(&self, writer: &mut impl Write) -> std::io::Result<()> {
@@ -277,7 +389,9 @@ impl Compiler {
                     " [{i}] {:?} {} ({:?})",
                     inst.op, inst.arg0, self.literals[inst.arg0 as usize]
                 )?,
-                Copy | Call => writeln!(writer, " [{i}] {:?} {}", inst.op, inst.arg0)?,
+                Copy | Call | Jmp | Jf | Pop | Store => {
+                    writeln!(writer, " [{i}] {:?} {}", inst.op, inst.arg0)?
+                }
                 _ => writeln!(writer, " [{i}] {:?}", inst.op)?,
             }
         }
@@ -343,12 +457,18 @@ impl ByteCode {
 
     fn interpret(&self) -> Option<Value> {
         let mut stack = vec![];
+        let mut ip = 0;
 
-        for (ip, instruction) in self.instructions.iter().enumerate() {
+        while ip < self.instructions.len() {
+            let instruction = &self.instructions[ip];
             dprintln!("interpret[{ip}]: {instruction:?} stack: {stack:?}");
             match instruction.op {
                 OpCode::LoadLiteral => {
                     stack.push(self.literals[instruction.arg0 as usize].clone());
+                }
+                OpCode::Store => {
+                    let idx = stack.len() - instruction.arg0 as usize - 1;
+                    stack[idx] = stack.pop().expect("Store needs an argument");
                 }
                 OpCode::Copy => {
                     stack.push(stack[stack.len() - instruction.arg0 as usize - 1].clone());
@@ -381,7 +501,25 @@ impl ByteCode {
                     stack.resize(stack.len() - instruction.arg0 as usize - 1, Value::F64(0.));
                     stack.push(res);
                 }
+                OpCode::Jmp => {
+                    ip = instruction.arg0 as usize;
+                    continue;
+                }
+                OpCode::Jf => {
+                    let cond = stack.pop().expect("Jf needs an argument");
+                    if cond.coerce_f64() == 0. {
+                        ip = instruction.arg0 as usize;
+                        continue;
+                    }
+                }
+                OpCode::Lt => {
+                    self.interpret_bin_op(&mut stack, |lhs, rhs| (lhs < rhs) as i32 as f64)
+                }
+                OpCode::Pop => {
+                    stack.resize(stack.len() - instruction.arg0 as usize, Value::default());
+                }
             }
+            ip += 1
         }
 
         stack.pop()

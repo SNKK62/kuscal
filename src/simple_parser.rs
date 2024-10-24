@@ -6,7 +6,7 @@ use nom::{
     error::ParseError,
     multi::{fold_many0, many0},
     number::complete::recognize_float,
-    sequence::{delimited, pair},
+    sequence::{delimited, pair, preceded},
     IResult, Parser,
 };
 
@@ -19,6 +19,13 @@ pub enum Expression<'src> {
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
     Mul(Box<Expression<'src>>, Box<Expression<'src>>),
     Div(Box<Expression<'src>>, Box<Expression<'src>>),
+    Gt(Box<Expression<'src>>, Box<Expression<'src>>),
+    Lt(Box<Expression<'src>>, Box<Expression<'src>>),
+    If(
+        Box<Expression<'src>>,
+        Box<Expression<'src>>,
+        Option<Box<Expression<'src>>>,
+    ),
 }
 
 fn space_delimited<'src, O, E>(
@@ -59,7 +66,7 @@ fn term(input: &str) -> IResult<&str, Expression> {
 }
 
 fn ident(input: &str) -> IResult<&str, Expression> {
-    let (r, res) = delimited(multispace0, identifier, multispace0)(input)?;
+    let (r, res) = space_delimited(identifier)(input)?;
     Ok((r, Expression::Ident(res)))
 }
 
@@ -71,7 +78,7 @@ fn identifier(input: &str) -> IResult<&str, &str> {
 }
 
 fn number(input: &str) -> IResult<&str, Expression> {
-    let (r, v) = delimited(multispace0, recognize_float, multispace0)(input)?;
+    let (r, v) = space_delimited(recognize_float)(input)?;
     Ok((
         r,
         Expression::NumLiteral(v.parse().map_err(|_| {
@@ -84,14 +91,10 @@ fn number(input: &str) -> IResult<&str, Expression> {
 }
 
 fn parens(i: &str) -> IResult<&str, Expression> {
-    delimited(
-        multispace0,
-        delimited(tag("("), expr, tag(")")),
-        multispace0,
-    )(i)
+    space_delimited(delimited(tag("("), expr, tag(")")))(i)
 }
 
-pub fn expr(i: &str) -> IResult<&str, Expression> {
+fn num_expr(i: &str) -> IResult<&str, Expression> {
     let (i, init) = term(i)?;
 
     fold_many0(
@@ -103,4 +106,47 @@ pub fn expr(i: &str) -> IResult<&str, Expression> {
             _ => panic!("Additive expression should have '+' or '-' operator"),
         },
     )(i)
+}
+
+fn cond_expr(i: &str) -> IResult<&str, Expression> {
+    let (i, first) = num_expr(i)?;
+    let (i, cond) = space_delimited(alt((char('<'), char('>'))))(i)?;
+    let (i, second) = num_expr(i)?;
+    Ok((
+        i,
+        match cond {
+            '<' => Expression::Lt(Box::new(first), Box::new(second)),
+            '>' => Expression::Gt(Box::new(first), Box::new(second)),
+            _ => unreachable!(),
+        },
+    ))
+}
+
+fn open_brace(i: &str) -> IResult<&str, ()> {
+    let (i, _) = space_delimited(char('{'))(i)?;
+    Ok((i, ()))
+}
+
+fn close_brace(i: &str) -> IResult<&str, ()> {
+    let (i, _) = space_delimited(char('}'))(i)?;
+    Ok((i, ()))
+}
+
+fn if_expr(i: &str) -> IResult<&str, Expression> {
+    let (i, _) = space_delimited(tag("if"))(i)?;
+    let (i, cond) = expr(i)?;
+    let (i, t_case) = delimited(open_brace, expr, close_brace)(i)?;
+    let (i, f_case) = opt(preceded(
+        space_delimited(tag("else")),
+        alt((delimited(open_brace, expr, close_brace), if_expr)),
+    ))(i)?;
+
+    Ok((
+        i,
+        Expression::If(Box::new(cond), Box::new(t_case), f_case.map(Box::new)),
+    ))
+}
+
+pub fn expr(i: &str) -> IResult<&str, Expression> {
+    alt((if_expr, cond_expr, num_expr))(i)
 }
