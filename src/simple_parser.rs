@@ -1,10 +1,10 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
+    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, none_of},
     combinator::{map_res, opt, recognize},
     error::ParseError,
-    multi::{fold_many0, many0},
+    multi::{fold_many0, many0, separated_list0},
     number::complete::recognize_float,
     sequence::{delimited, pair, preceded, terminated},
     Finish, IResult, Parser,
@@ -14,6 +14,7 @@ use nom::{
 pub enum Expression<'src> {
     Ident(&'src str),
     NumLiteral(f64),
+    StrLiteral(String),
     FnInvoke(&'src str, Vec<Expression<'src>>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -41,6 +42,12 @@ pub enum Statement<'src> {
     },
     Break,
     Continue,
+    FnDef {
+        name: &'src str,
+        args: Vec<&'src str>,
+        stmts: Statements<'src>,
+    },
+    Return(Expression<'src>),
 }
 
 pub type Statements<'src> = Vec<Statement<'src>>;
@@ -55,7 +62,7 @@ where
 }
 
 fn factor(i: &str) -> IResult<&str, Expression> {
-    alt((number, func_call, ident, parens))(i)
+    alt((str_literal, number, func_call, ident, parens))(i)
 }
 
 fn func_call(i: &str) -> IResult<&str, Expression> {
@@ -92,6 +99,21 @@ fn identifier(input: &str) -> IResult<&str, &str> {
         alt((alpha1, tag("_"))),
         many0(alt((alphanumeric1, tag("_")))),
     ))(input)
+}
+
+fn str_literal(i: &str) -> IResult<&str, Expression> {
+    let (r0, _) = preceded(multispace0, char('\"'))(i)?;
+    let (r, val) = many0(none_of("\""))(r0)?;
+    let (r, _) = terminated(char('"'), multispace0)(r)?;
+    Ok((
+        r,
+        Expression::StrLiteral(
+            val.iter()
+                .collect::<String>()
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n"),
+        ),
+    ))
 }
 
 fn number(input: &str) -> IResult<&str, Expression> {
@@ -215,6 +237,22 @@ fn for_statement(i: &str) -> IResult<&str, Statement> {
     ))
 }
 
+fn fn_def_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("fn"))(i)?;
+    let (i, name) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(tag("("))(i)?;
+    let (i, args) = separated_list0(char(','), space_delimited(identifier))(i)?;
+    let (i, _) = space_delimited(tag(")"))(i)?;
+    let (i, stmts) = delimited(open_brace, statements, close_brace)(i)?;
+    Ok((i, Statement::FnDef { name, args, stmts }))
+}
+
+fn return_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("return"))(i)?;
+    let (i, ex) = space_delimited(expr)(i)?;
+    Ok((i, Statement::Return(ex)))
+}
+
 fn break_statement(i: &str) -> IResult<&str, Statement> {
     let (i, _) = space_delimited(tag("break"))(i)?;
     Ok((i, Statement::Break))
@@ -238,7 +276,9 @@ fn general_statement<'a>(last: bool) -> impl Fn(&'a str) -> IResult<&'a str, Sta
         alt((
             terminated(var_def, terminator),
             terminated(var_assign, terminator),
+            fn_def_statement,
             for_statement,
+            terminated(return_statement, terminator),
             terminated(break_statement, terminator),
             terminated(continue_statement, terminator),
             terminated(expr_statement, terminator),
@@ -268,4 +308,36 @@ fn statements(i: &str) -> IResult<&str, Statements> {
 pub fn statements_finish(i: &str) -> Result<Statements, nom::error::Error<&str>> {
     let (_, res) = statements(i).finish()?;
     Ok(res)
+}
+
+#[test]
+fn t_stmts() {
+    let s = "1; 2; 3";
+    assert_eq!(
+        statements(s),
+        Ok((
+            "",
+            vec![
+                Statement::Expression(Expression::NumLiteral(1.)),
+                Statement::Expression(Expression::NumLiteral(2.)),
+                Statement::Expression(Expression::NumLiteral(3.)),
+            ]
+        ))
+    )
+}
+
+#[test]
+fn t_stmts_semicolon_terminated() {
+    let s = "1; 2; 3;";
+    assert_eq!(
+        statements(s),
+        Ok((
+            "",
+            vec![
+                Statement::Expression(Expression::NumLiteral(1.)),
+                Statement::Expression(Expression::NumLiteral(2.)),
+                Statement::Expression(Expression::NumLiteral(3.)),
+            ]
+        ))
+    )
 }
