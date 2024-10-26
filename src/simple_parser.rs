@@ -1,13 +1,13 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, alphanumeric1, char, multispace0},
-    combinator::{opt, recognize},
+    character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1},
+    combinator::{map_res, opt, recognize},
     error::ParseError,
     multi::{fold_many0, many0},
     number::complete::recognize_float,
-    sequence::{delimited, pair, preceded},
-    IResult, Parser,
+    sequence::{delimited, pair, preceded, terminated},
+    Finish, IResult, Parser,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -23,10 +23,27 @@ pub enum Expression<'src> {
     Lt(Box<Expression<'src>>, Box<Expression<'src>>),
     If(
         Box<Expression<'src>>,
-        Box<Expression<'src>>,
-        Option<Box<Expression<'src>>>,
+        Box<Statements<'src>>,
+        Option<Box<Statements<'src>>>,
     ),
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement<'src> {
+    Expression(Expression<'src>),
+    VarDef(&'src str, Expression<'src>),
+    VarAssign(&'src str, Expression<'src>),
+    For {
+        loop_var: &'src str,
+        start: Expression<'src>,
+        end: Expression<'src>,
+        stmts: Statements<'src>,
+    },
+    Break,
+    Continue,
+}
+
+pub type Statements<'src> = Vec<Statement<'src>>;
 
 fn space_delimited<'src, O, E>(
     f: impl Parser<&'src str, O, E>,
@@ -135,10 +152,18 @@ fn close_brace(i: &str) -> IResult<&str, ()> {
 fn if_expr(i: &str) -> IResult<&str, Expression> {
     let (i, _) = space_delimited(tag("if"))(i)?;
     let (i, cond) = expr(i)?;
-    let (i, t_case) = delimited(open_brace, expr, close_brace)(i)?;
+    let (i, t_case) = delimited(open_brace, statements, close_brace)(i)?;
     let (i, f_case) = opt(preceded(
         space_delimited(tag("else")),
-        alt((delimited(open_brace, expr, close_brace), if_expr)),
+        alt((
+            delimited(open_brace, statements, close_brace),
+            map_res(
+                if_expr,
+                |v| -> Result<Vec<Statement>, nom::error::Error<&str>> {
+                    Ok(vec![Statement::Expression(v)])
+                },
+            ),
+        )),
     ))(i)?;
 
     Ok((
@@ -149,4 +174,98 @@ fn if_expr(i: &str) -> IResult<&str, Expression> {
 
 pub fn expr(i: &str) -> IResult<&str, Expression> {
     alt((if_expr, cond_expr, num_expr))(i)
+}
+
+fn var_def(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = delimited(multispace0, tag("var"), multispace1)(i)?;
+    let (i, name) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(char('='))(i)?;
+    let (i, expr) = space_delimited(expr)(i)?;
+    Ok((i, Statement::VarDef(name, expr)))
+}
+
+fn var_assign(i: &str) -> IResult<&str, Statement> {
+    let (i, name) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(char('='))(i)?;
+    let (i, expr) = space_delimited(expr)(i)?;
+    Ok((i, Statement::VarAssign(name, expr)))
+}
+
+fn expr_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, res) = expr(i)?;
+    Ok((i, Statement::Expression(res)))
+}
+
+fn for_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("for"))(i)?;
+    let (i, loop_var) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(tag("in"))(i)?;
+    let (i, start) = space_delimited(expr)(i)?;
+    let (i, _) = space_delimited(tag("to"))(i)?;
+    let (i, end) = space_delimited(expr)(i)?;
+    let (i, stmts) = delimited(open_brace, statements, close_brace)(i)?;
+    Ok((
+        i,
+        Statement::For {
+            loop_var,
+            start,
+            end,
+            stmts,
+        },
+    ))
+}
+
+fn break_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("break"))(i)?;
+    Ok((i, Statement::Break))
+}
+
+fn continue_statement(i: &str) -> IResult<&str, Statement> {
+    let (i, _) = space_delimited(tag("continue"))(i)?;
+    Ok((i, Statement::Continue))
+}
+
+fn general_statement<'a>(last: bool) -> impl Fn(&'a str) -> IResult<&'a str, Statement> {
+    let terminator = move |i| -> IResult<&str, ()> {
+        let mut semicolon = pair(tag(";"), multispace0);
+        if last {
+            Ok((opt(semicolon)(i)?.0, ()))
+        } else {
+            Ok((semicolon(i)?.0, ()))
+        }
+    };
+    move |input: &str| {
+        alt((
+            terminated(var_def, terminator),
+            terminated(var_assign, terminator),
+            for_statement,
+            terminated(break_statement, terminator),
+            terminated(continue_statement, terminator),
+            terminated(expr_statement, terminator),
+            terminated(expr_statement, terminator),
+        ))(input)
+    }
+}
+
+pub fn last_statement(i: &str) -> IResult<&str, Statement> {
+    general_statement(true)(i)
+}
+
+pub fn statement(i: &str) -> IResult<&str, Statement> {
+    general_statement(false)(i)
+}
+
+fn statements(i: &str) -> IResult<&str, Statements> {
+    let (r, mut v) = many0(statement)(i)?;
+    let (r, last) = opt(last_statement)(r)?;
+    let (r, _) = opt(multispace0)(r)?;
+    if let Some(last) = last {
+        v.push(last)
+    }
+    Ok((r, v))
+}
+
+pub fn statements_finish(i: &str) -> Result<Statements, nom::error::Error<&str>> {
+    let (_, res) = statements(i).finish()?;
+    Ok(res)
 }
