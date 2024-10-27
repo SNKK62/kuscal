@@ -45,7 +45,7 @@ fn binary_fn<'a>(f: fn(f64, f64) -> f64) -> FnDecl<'a> {
 
 fn print_fn(args: &[Value]) -> Value {
     for arg in args {
-        print!("{:?}", arg);
+        print!("{} ", arg);
     }
     println!();
     Value::F64(0.)
@@ -316,9 +316,9 @@ fn tc_expr<'src>(
     Ok(match &e.expr {
         NumLiteral(_val) => TypeDecl::F64,
         StrLiteral(_val) => TypeDecl::Str,
-        Ident(name) => ctx
-            .get_var(name)
-            .ok_or_else(|| TypeCheckError::new(format!("Variable {} not found", name), e.span))?,
+        Ident(name) => ctx.get_var(name).ok_or_else(|| {
+            TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
+        })?,
         FnInvoke(name, args) => {
             let args_ty = args
                 .iter()
@@ -418,6 +418,10 @@ pub fn type_check<'src>(
                 // TODO
             }
             Statement::Continue => (),
+            Statement::Yield(e) => {
+                tc_expr(e, ctx)?;
+                // TODO
+            }
         }
     }
     Ok(res)
@@ -521,6 +525,7 @@ pub enum Statement<'src> {
         stmts: Statements<'src>,
     },
     Return(Expression<'src>),
+    Yield(Expression<'src>),
 }
 
 impl<'src> Statement<'src> {
@@ -534,6 +539,7 @@ impl<'src> Statement<'src> {
             FnDef { name, stmts, .. } => calc_offset(*name, stmts.span()),
             Return(ex) => ex.span,
             Break | Continue => return None,
+            Yield(ex) => ex.span,
         })
     }
 }
@@ -863,6 +869,12 @@ fn continue_statement(i: Span) -> IResult<Span, Statement> {
     Ok((i, Statement::Continue))
 }
 
+fn yield_statement(i: Span) -> IResult<Span, Statement> {
+    let (i, _) = space_delimited(tag("yield"))(i)?;
+    let (i, ex) = cut(space_delimited(expr))(i)?;
+    Ok((i, Statement::Yield(ex)))
+}
+
 fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, Statement> {
     let terminator = move |i| -> IResult<Span, ()> {
         let mut semicolon = pair(tag(";"), multispace0);
@@ -881,6 +893,7 @@ fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, S
             terminated(return_statement, terminator),
             terminated(break_statement, terminator),
             terminated(continue_statement, terminator),
+            terminated(yield_statement, terminator),
             terminated(expr_statement, terminator),
         ))(input)
     }

@@ -33,6 +33,8 @@ pub enum OpCode {
     Pop,
     /// Return from function
     Ret,
+    // Suspend current function execution where it can resume later
+    Yield,
 }
 
 macro_rules! impl_op_from {
@@ -65,7 +67,8 @@ impl_op_from!(
     Jf,
     Lt,
     Pop,
-    Ret
+    Ret,
+    Yield
 );
 
 #[derive(Debug, Clone, Copy)]
@@ -609,6 +612,11 @@ impl Compiler {
                     self.add_copy_inst(res);
                     self.add_inst(OpCode::Ret, (self.target_stack.len() - res.0 - 1) as u8);
                 }
+                Statement::Yield(ex) => {
+                    let res = self.compile_expr(ex)?;
+                    self.add_inst(OpCode::Yield, (self.target_stack.len() - res.0 - 1) as u8);
+                    self.target_stack.pop();
+                }
             }
         }
         Ok(last_result)
@@ -725,13 +733,70 @@ impl ByteCode {
         self.funcs = funcs;
         Ok(())
     }
+}
 
-    fn interpret(
-        &self,
+enum YieldResult {
+    Finished(Value),
+    Suspend(Value),
+}
+
+struct StackFrame<'f> {
+    fn_def: &'f FnByteCode,
+    args: usize,
+    stack: Vec<Value>,
+    ip: usize,
+}
+
+impl<'f> StackFrame<'f> {
+    fn new(fn_def: &'f FnByteCode, args: Vec<Value>) -> Self {
+        Self {
+            fn_def,
+            args: args.len(),
+            stack: args,
+            ip: 0,
+        }
+    }
+
+    fn inst(&self) -> Option<Instruction> {
+        let ret = self.fn_def.instructions.get(self.ip)?;
+        dprintln!("interpret[{}]: {:?} stack: {:?}", self.ip, ret, self.stack);
+        Some(*ret)
+    }
+}
+
+struct Vm<'code> {
+    bytecode: &'code ByteCode,
+    stack_frames: Vec<StackFrame<'code>>,
+}
+
+impl<'code> Vm<'code> {
+    fn new(bytecode: &'code ByteCode) -> Self {
+        Self {
+            bytecode,
+            stack_frames: vec![],
+        }
+    }
+
+    fn top(&self) -> Result<&StackFrame, String> {
+        self.stack_frames
+            .last()
+            .ok_or_else(|| "Stack frame underflow".to_string())
+    }
+
+    fn top_mut(&mut self) -> Result<&mut StackFrame<'code>, String> {
+        self.stack_frames
+            .last_mut()
+            .ok_or_else(|| "Stack frame underflow".to_string())
+    }
+
+    #[allow(dead_code)]
+    fn run_fn(
+        &mut self,
         fn_name: &str,
         args: &[Value],
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let fn_def = self
+            .bytecode
             .funcs
             .get(fn_name)
             .ok_or_else(|| format!("Function {fn_name:?} was not found"))?;
@@ -739,87 +804,184 @@ impl ByteCode {
             FnDef::User(user) => user,
             FnDef::Native(n) => return Ok((*n.code)(args)),
         };
-        let mut stack = args.to_vec();
-        let mut ip = 0;
+        self.stack_frames
+            .push(StackFrame::new(fn_def, args.to_vec()));
 
-        while ip < fn_def.instructions.len() {
-            let instruction = &fn_def.instructions[ip];
-            dprintln!("interpret[{ip}]: {instruction:?} stack: {stack:?}");
+        match self.interpret()? {
+            YieldResult::Finished(val) => Ok(val),
+            YieldResult::Suspend(_) => Err("Yielded at toplevel".into()),
+        }
+    }
+
+    fn init_fn(&mut self, fn_name: &str, args: &[Value]) -> Result<(), Box<dyn std::error::Error>> {
+        let fn_def = self
+            .bytecode
+            .funcs
+            .get(fn_name)
+            .ok_or_else(|| format!("Function {fn_name:?} was not found"))?;
+        let fn_def = match fn_def {
+            FnDef::User(user) => user,
+            FnDef::Native(_) => {
+                return Err(
+                    "Native function cannot be called as a coroutine. Use `run_fn` instead.".into(),
+                )
+            }
+        };
+        self.stack_frames
+            .push(StackFrame::new(fn_def, args.to_vec()));
+        Ok(())
+    }
+
+    fn return_fn(&mut self, stack_pos: u8) -> Result<Option<YieldResult>, Box<dyn Error>> {
+        let top_frame = self
+            .stack_frames
+            .pop()
+            .ok_or_else(|| "Stack frame underflow".to_string())?;
+        let res = top_frame
+            .stack
+            .get(top_frame.stack.len() - stack_pos as usize - 1)
+            .ok_or_else(|| "Stack underflow at last".to_string())?
+            .clone();
+        let args = top_frame.args;
+
+        if self.stack_frames.is_empty() {
+            return Ok(Some(YieldResult::Finished(res)));
+        }
+
+        dprintln!("Return {}", res);
+
+        let stack = &mut self.top_mut()?.stack;
+        stack.resize(stack.len() - args - 1, Value::F64(0.));
+        stack.push(res);
+        self.top_mut()?.ip += 1;
+        Ok(None)
+    }
+
+    fn interpret(&mut self) -> Result<YieldResult, Box<dyn std::error::Error>> {
+        loop {
+            let instruction = if let Some(instruction) = self.top()?.inst() {
+                instruction
+            } else {
+                if let Some(res) = self.return_fn(0)? {
+                    return Ok(res);
+                }
+                continue;
+            };
+
             match instruction.op {
                 OpCode::LoadLiteral => {
-                    stack.push(fn_def.literals[instruction.arg0 as usize].clone());
+                    let stack_frame = self.top_mut()?;
+                    stack_frame
+                        .stack
+                        .push(stack_frame.fn_def.literals[instruction.arg0 as usize].clone())
                 }
                 OpCode::Store => {
+                    let stack = &mut self.top_mut()?.stack;
                     let idx = stack.len() - instruction.arg0 as usize - 1;
                     let value = stack.pop().expect("Store needs an argument");
                     stack[idx] = value;
                 }
                 OpCode::Copy => {
+                    let stack = &mut self.top_mut()?.stack;
                     stack.push(stack[stack.len() - instruction.arg0 as usize - 1].clone());
                 }
                 OpCode::Dup => {
+                    let stack = &mut self.top_mut()?.stack;
                     let top = stack.last().unwrap().clone();
                     stack.extend((0..instruction.arg0).map(|_| top.clone()));
                 }
-                OpCode::Add => self.interpret_bin_op_str(
-                    &mut stack,
+                OpCode::Add => Self::interpret_bin_op_str(
+                    &mut self.top_mut()?.stack,
                     |lhs, rhs| lhs + rhs,
                     |lhs, rhs| lhs + rhs,
                     |lhs, rhs| Some(format!("{lhs}{rhs}")),
                 ),
-                OpCode::Sub => {
-                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs - rhs, |lhs, rhs| lhs - rhs)
-                }
-                OpCode::Mul => {
-                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs * rhs, |lhs, rhs| lhs * rhs)
-                }
-                OpCode::Div => {
-                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs / rhs, |lhs, rhs| lhs / rhs)
-                }
+                OpCode::Sub => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
+                    |lhs, rhs| lhs - rhs,
+                    |lhs, rhs| lhs - rhs,
+                ),
+                OpCode::Mul => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
+                    |lhs, rhs| lhs * rhs,
+                    |lhs, rhs| lhs * rhs,
+                ),
+                OpCode::Div => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
+                    |lhs, rhs| lhs / rhs,
+                    |lhs, rhs| lhs / rhs,
+                ),
                 OpCode::Call => {
+                    let stack = &self.top()?.stack;
                     let args = &stack[stack.len() - instruction.arg0 as usize..];
                     let fname = &stack[stack.len() - instruction.arg0 as usize - 1];
                     let Value::Str(fname) = fname else {
                         panic!("Function name shall be a string: {fname:?}");
                     };
-                    let res = self.interpret(fname, args)?;
-                    stack.resize(stack.len() - instruction.arg0 as usize - 1, Value::F64(0.));
-                    stack.push(res);
+                    let fn_def = self
+                        .bytecode
+                        .funcs
+                        .get(fname)
+                        .ok_or_else(|| format!("Function name shall be a string: {fname:?}"))?;
+                    match fn_def {
+                        FnDef::User(user_fn) => {
+                            self.stack_frames
+                                .push(StackFrame::new(user_fn, args.to_vec()));
+                            continue;
+                        }
+                        FnDef::Native(native) => {
+                            let res = (native.code)(args);
+                            let stack = &mut (self.top_mut()?.stack);
+                            stack.resize(
+                                stack.len() - instruction.arg0 as usize - 1,
+                                Value::F64(0.),
+                            );
+                            stack.push(res);
+                        }
+                    }
                 }
                 OpCode::Jmp => {
-                    ip = instruction.arg0 as usize;
+                    self.top_mut()?.ip = instruction.arg0 as usize;
                     continue;
                 }
                 OpCode::Jf => {
+                    let stack = &mut self.top_mut()?.stack;
                     let cond = stack.pop().expect("Jf needs an argument");
                     if cond.coerce_f64() == 0. {
-                        ip = instruction.arg0 as usize;
+                        self.top_mut()?.ip = instruction.arg0 as usize;
                         continue;
                     }
                 }
-                OpCode::Lt => self.interpret_bin_op(
-                    &mut stack,
+                OpCode::Lt => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
                     |lhs, rhs| (lhs < rhs) as i32 as f64,
                     |lhs, rhs| (lhs < rhs) as i64,
                 ),
                 OpCode::Pop => {
+                    let stack = &mut self.top_mut()?.stack;
                     stack.resize(stack.len() - instruction.arg0 as usize, Value::default());
                 }
                 OpCode::Ret => {
-                    return Ok(stack
-                        .get(stack.len() - instruction.arg0 as usize - 1)
-                        .ok_or_else(|| "Stack underflow".to_string())?
-                        .clone())
+                    if let Some(res) = self.return_fn(instruction.arg0)? {
+                        return Ok(res);
+                    }
+                    continue;
+                }
+                OpCode::Yield => {
+                    let top_frame = self.top_mut()?;
+                    let res = top_frame
+                        .stack
+                        .pop()
+                        .ok_or_else(|| "Stack underflow".to_string())?;
+                    top_frame.ip += 1;
+                    return Ok(YieldResult::Suspend(res));
                 }
             }
-            ip += 1
+            self.top_mut()?.ip += 1;
         }
-
-        Ok(stack.pop().ok_or_else(|| "Stack underflow".to_string())?)
     }
 
     fn interpret_bin_op_str(
-        &self,
         stack: &mut Vec<Value>,
         op_f64: impl FnOnce(f64, f64) -> f64,
         op_i64: impl FnOnce(i64, i64) -> i64,
@@ -846,12 +1008,17 @@ impl ByteCode {
     }
 
     fn interpret_bin_op(
-        &self,
         stack: &mut Vec<Value>,
         op_f64: impl FnOnce(f64, f64) -> f64,
         op_i64: impl FnOnce(i64, i64) -> i64,
     ) {
-        self.interpret_bin_op_str(stack, op_f64, op_i64, |_, _| None);
+        Self::interpret_bin_op_str(stack, op_f64, op_i64, |_, _| None);
+    }
+
+    fn back_trace(&self) {
+        for (i, frame) in self.stack_frames.iter().rev().enumerate() {
+            println!("[{}]: {:?}", i, frame.stack);
+        }
     }
 }
 
@@ -876,9 +1043,48 @@ fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
     Ok(bytecode)
 }
 
+fn debugger(vm: &Vm) -> bool {
+    println!("[c]ontinue/[p]rint/[e]xit/[bt]race?");
+    loop {
+        let mut buffer = String::new();
+        if std::io::stdin().read_line(&mut buffer).is_ok() {
+            match buffer.trim() {
+                "c" => return false,
+                "p" => {
+                    println!("Stack: {:?}", vm.top().unwrap().stack);
+                }
+                "e" => return true,
+                "bt" => vm.back_trace(),
+                _ => println!("Please say [c]ontinue/[p]rint/[b]reak/[bt]race"),
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(args) = parse_args(true) else {
         return Ok(());
+    };
+
+    let run_coro = |mut vm: Vm| {
+        if let Err(e) = vm.init_fn("main", &[]) {
+            eprintln!("init_fn error: {e:?}");
+        }
+        loop {
+            match vm.interpret() {
+                Ok(YieldResult::Finished(_)) => break,
+                Ok(YieldResult::Suspend(value)) => {
+                    println!("Execution suspended with a yielded value {value}");
+                    if value == Value::Str("break".to_string()) && debugger(&vm) {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Runtime error: {e:?}");
+                    break;
+                }
+            }
+        }
     };
 
     match args.run_mode {
@@ -898,9 +1104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let reader = std::fs::File::open(&code_file)?;
             let mut reader = BufReader::new(reader);
             let bytecode = read_program(&mut reader)?;
-            if let Err(e) = bytecode.interpret("main", &[]) {
-                eprintln!("Runtime error: {e:?}");
-            }
+            run_coro(Vm::new(&bytecode));
         }
         RunMode::CompileAndRun => {
             let mut buf = vec![];
@@ -909,9 +1113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let bytecode = read_program(&mut std::io::Cursor::new(&mut buf))?;
-            if let Err(e) = bytecode.interpret("main", &[]) {
-                eprintln!("Runtime error: {e:?}");
-            }
+            run_coro(Vm::new(&bytecode));
         }
         _ => println!("Please specify -c, -r, -t or -R as an argument"),
     }
