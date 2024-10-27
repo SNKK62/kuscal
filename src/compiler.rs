@@ -1,12 +1,17 @@
+use ruscal::{dprintln, parse_args, Args, RunMode};
 use std::{
     collections::HashMap,
     error::Error,
     fmt::Display,
     io::{BufReader, BufWriter, Read, Write},
 };
-mod simple_parser;
-use ruscal::{dprintln, parse_args, Args, RunMode};
-use simple_parser::{statements_finish, Expression, Statement, Statements};
+mod parser;
+use crate::parser::{
+    standard_functions, statements_finish, type_check, ExprEnum, Expression, FnDecl, NativeFn,
+    Span, Statement, Statements, TypeCheckContext, TypeDecl,
+};
+mod value;
+use value::{deserialize_size, deserialize_str, serialize_size, serialize_str, Value};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -87,108 +92,6 @@ impl Instruction {
     }
 }
 
-fn serialize_size(sz: usize, writer: &mut impl Write) -> std::io::Result<()> {
-    writer.write_all(&(sz as u32).to_le_bytes())
-}
-
-fn deserialize_size(reader: &mut impl Read) -> std::io::Result<usize> {
-    let mut buf = [0u8; std::mem::size_of::<u32>()];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf) as usize)
-}
-
-fn serialize_str(s: &str, writer: &mut impl Write) -> std::io::Result<()> {
-    serialize_size(s.len(), writer)?;
-    writer.write_all(s.as_bytes())?;
-    Ok(())
-}
-
-fn deserialize_str(reader: &mut impl Read) -> std::io::Result<String> {
-    let mut buf = vec![0u8; deserialize_size(reader)?];
-    reader.read_exact(&mut buf)?;
-    let s = String::from_utf8(buf).unwrap();
-    Ok(s)
-}
-
-#[repr(u8)]
-enum ValueKind {
-    F64,
-    Str,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Value {
-    F64(f64),
-    Str(String),
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Self::F64(0.)
-    }
-}
-
-impl Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::F64(value) => write!(f, "{value}"),
-            Self::Str(value) => write!(f, "{value}"),
-        }
-    }
-}
-
-impl Value {
-    fn kind(&self) -> ValueKind {
-        match self {
-            Self::F64(_) => ValueKind::F64,
-            Self::Str(_) => ValueKind::Str,
-        }
-    }
-
-    fn serialize(&self, writer: &mut impl Write) -> std::io::Result<()> {
-        let kind = self.kind() as u8;
-        writer.write_all(&[kind])?;
-        match self {
-            Self::F64(value) => {
-                writer.write_all(&value.to_le_bytes())?;
-            }
-            Self::Str(value) => serialize_str(value, writer)?,
-        };
-        Ok(())
-    }
-
-    #[allow(non_upper_case_globals)]
-    fn deserialize(reader: &mut impl Read) -> std::io::Result<Self> {
-        const F64: u8 = ValueKind::F64 as u8;
-        const Str: u8 = ValueKind::Str as u8;
-
-        let mut kind_buf = [0u8; 1];
-        reader.read_exact(&mut kind_buf)?;
-        match kind_buf[0] {
-            F64 => {
-                let mut buf = [0u8; std::mem::size_of::<f64>()];
-                reader.read_exact(&mut buf)?;
-                Ok(Value::F64(f64::from_le_bytes(buf)))
-            }
-            Str => Ok(Value::Str(deserialize_str(reader)?)),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "ValueKind {} does not match to any known kinds",
-                    kind_buf[0]
-                ),
-            )),
-        }
-    }
-
-    fn coerce_f64(&self) -> f64 {
-        match self {
-            Self::F64(value) => *value,
-            _ => panic!("Coercion failed: {:?} cannot be coerced to f64", self),
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 /// Absolute Stack Index
 struct StkIdx(usize);
@@ -232,13 +135,13 @@ impl Display for LoopStackUnderflowError {
 
 impl Error for LoopStackUnderflowError {}
 
-struct FnDef {
+struct FnByteCode {
     args: Vec<String>,
     literals: Vec<Value>,
     instructions: Vec<Instruction>,
 }
 
-impl FnDef {
+impl FnByteCode {
     fn write_args(args: &[String], writer: &mut impl Write) -> std::io::Result<()> {
         serialize_size(args.len(), writer)?;
         for arg in args {
@@ -333,7 +236,7 @@ fn disasm_common(
                 "   [{i}] {:?} {} ({:?})",
                 inst.op, inst.arg0, literals[inst.arg0 as usize]
             )?,
-            Copy | Dup | Call | Jmp | Jf | Pop | Store => {
+            Copy | Dup | Call | Jmp | Jf | Pop | Store | Ret => {
                 writeln!(writer, "   [{i}] {:?} {}", inst.op, inst.arg0)?
             }
             _ => writeln!(writer, "   [{i}] {:?}", inst.op)?,
@@ -346,7 +249,7 @@ struct Compiler {
     literals: Vec<Value>,
     instructions: Vec<Instruction>,
     target_stack: Vec<Target>,
-    funcs: HashMap<String, FnDef>,
+    funcs: HashMap<String, FnByteCode>,
     loop_stack: Vec<LoopFrame>,
 }
 
@@ -464,11 +367,11 @@ impl Compiler {
         Some(inst)
     }
 
-    fn add_fn(&mut self, name: String, args: &[&str]) {
+    fn add_fn(&mut self, name: String, args: &[(Span, TypeDecl)]) {
         self.funcs.insert(
             name,
-            FnDef {
-                args: args.iter().map(|arg| arg.to_string()).collect(),
+            FnByteCode {
+                args: args.iter().map(|(arg, _)| arg.to_string()).collect(),
                 literals: std::mem::take(&mut self.literals),
                 instructions: std::mem::take(&mut self.instructions),
             },
@@ -485,21 +388,21 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, ex: &Expression) -> Result<StkIdx, Box<dyn Error>> {
-        Ok(match ex {
-            Expression::NumLiteral(num) => {
+        Ok(match &ex.expr {
+            ExprEnum::NumLiteral(num) => {
                 let id = self.add_literal(Value::F64(*num));
                 self.add_load_literal_inst(id);
                 self.stack_top()
             }
-            Expression::StrLiteral(str) => {
+            ExprEnum::StrLiteral(str) => {
                 let id = self.add_literal(Value::Str(str.clone()));
                 self.add_load_literal_inst(id);
                 self.stack_top()
             }
-            Expression::Ident(ident) => {
+            ExprEnum::Ident(ident) => {
                 let var = self.target_stack.iter().enumerate().find(|(_i, tgt)| {
                     if let Target::Local(id) = tgt {
-                        id == ident
+                        id == ident.fragment()
                     } else {
                         false
                     }
@@ -510,13 +413,13 @@ impl Compiler {
                     return Err(format!("Variable not found: {ident:?}").into());
                 }
             }
-            Expression::Add(lhs, rhs) => self.bin_op(OpCode::Add, lhs, rhs)?,
-            Expression::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs)?,
-            Expression::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs)?,
-            Expression::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs)?,
-            Expression::Gt(lhs, rhs) => self.bin_op(OpCode::Lt, rhs, lhs)?,
-            Expression::Lt(lhs, rhs) => self.bin_op(OpCode::Lt, lhs, rhs)?,
-            Expression::FnInvoke(name, args) => {
+            ExprEnum::Add(lhs, rhs) => self.bin_op(OpCode::Add, lhs, rhs)?,
+            ExprEnum::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs)?,
+            ExprEnum::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs)?,
+            ExprEnum::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs)?,
+            ExprEnum::Gt(lhs, rhs) => self.bin_op(OpCode::Lt, rhs, lhs)?,
+            ExprEnum::Lt(lhs, rhs) => self.bin_op(OpCode::Lt, lhs, rhs)?,
+            ExprEnum::FnInvoke(name, args) => {
                 let stack_before_args = self.target_stack.len();
                 let name = self.add_literal(Value::Str(name.to_string()));
                 let args = args
@@ -535,7 +438,7 @@ impl Compiler {
                 self.coerce_stack(StkIdx(stack_before_args));
                 self.stack_top()
             }
-            Expression::If(cond, true_branch, false_branch) => {
+            ExprEnum::If(cond, true_branch, false_branch) => {
                 use OpCode::*;
                 let cond = self.compile_expr(cond)?;
                 self.add_copy_inst(cond);
@@ -595,15 +498,15 @@ impl Compiler {
                 Statement::Expression(ex) => {
                     last_result = Some(self.compile_expr(ex)?);
                 }
-                Statement::VarDef(vname, ex) => {
+                Statement::VarDef { name, ex, .. } => {
                     let mut ex = self.compile_expr(ex)?;
-                    if matches!(self.target_stack[ex.0], Target::Local(_)) {
+                    if !matches!(self.target_stack[ex.0], Target::Temp) {
                         self.add_copy_inst(ex);
                         ex = self.stack_top();
                     }
-                    self.target_stack[ex.0] = Target::Local(vname.to_string());
+                    self.target_stack[ex.0] = Target::Local(name.to_string());
                 }
-                Statement::VarAssign(vname, ex) => {
+                Statement::VarAssign { name, ex, .. } => {
                     let stk_ex = self.compile_expr(ex)?;
                     let (stk_local, _) = self
                         .target_stack
@@ -611,12 +514,12 @@ impl Compiler {
                         .enumerate()
                         .find(|(_, tgt)| {
                             if let Target::Local(tgt) = tgt {
-                                tgt == vname
+                                tgt == name.fragment()
                             } else {
                                 false
                             }
                         })
-                        .ok_or_else(|| format!("Variable name not found: {vname}"))?;
+                        .ok_or_else(|| format!("Variable name not found: {name}"))?;
                     self.add_copy_inst(stk_ex);
                     self.add_store_inst(StkIdx(stk_local));
                 }
@@ -625,6 +528,7 @@ impl Compiler {
                     start,
                     end,
                     stmts,
+                    ..
                 } => {
                     let stk_start = self.compile_expr(start)?;
                     let stk_end = self.compile_expr(end)?;
@@ -684,13 +588,15 @@ impl Compiler {
                     self.add_inst(OpCode::Dup, 0);
                     self.add_inst(OpCode::Jmp, 0);
                 }
-                Statement::FnDef { name, args, stmts } => {
+                Statement::FnDef {
+                    name, args, stmts, ..
+                } => {
                     let literals = std::mem::take(&mut self.literals);
                     let instructions = std::mem::take(&mut self.instructions);
                     let target_stack = std::mem::take(&mut self.target_stack);
                     self.target_stack = args
                         .iter()
-                        .map(|arg| Target::Local(arg.to_string()))
+                        .map(|arg| Target::Local(arg.0.to_string()))
                         .collect();
                     self.compile_stmts(stmts)?;
                     self.add_fn(name.to_string(), args);
@@ -701,7 +607,7 @@ impl Compiler {
                 Statement::Return(ex) => {
                     let res = self.compile_expr(ex)?;
                     self.add_copy_inst(res);
-                    self.add_inst(OpCode::Ret, 0);
+                    self.add_inst(OpCode::Ret, (self.target_stack.len() - res.0 - 1) as u8);
                 }
             }
         }
@@ -733,6 +639,7 @@ impl Compiler {
 }
 
 fn write_program(
+    source_file: &str,
     source: &str,
     writer: &mut impl Write,
     out_file: &str,
@@ -740,10 +647,32 @@ fn write_program(
     show_ast: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut compiler = Compiler::new();
-    let stmts = statements_finish(source).map_err(|e| e.to_string())?;
+    let stmts = statements_finish(Span::new(source)).map_err(|e| {
+        format!(
+            "{}:{}:{}: {}",
+            source_file,
+            e.input.location_line(),
+            e.input.get_utf8_column(),
+            e
+        )
+    })?;
 
     if show_ast {
         dprintln!("AST: {stmts:#?}");
+    }
+
+    match type_check(&stmts, &mut TypeCheckContext::new()) {
+        Ok(_) => println!("Typecheck Ok"),
+        Err(e) => {
+            return Err(format!(
+                "{}:{}:{}: {}",
+                source_file,
+                e.span.location_line(),
+                e.span.get_utf8_column(),
+                e
+            )
+            .into())
+        }
     }
 
     compiler.compile(&stmts)?;
@@ -761,21 +690,6 @@ fn write_program(
     Ok(())
 }
 
-fn print_fn(args: &[Value]) -> Value {
-    for arg in args {
-        print!("{:?}", arg);
-    }
-    println!();
-    Value::F64(0.)
-}
-
-fn puts_fn(args: &[Value]) -> Value {
-    for arg in args {
-        print!("{}", arg);
-    }
-    Value::F64(0.)
-}
-
 struct ByteCode {
     funcs: HashMap<String, FnDef>,
 }
@@ -789,10 +703,19 @@ impl ByteCode {
 
     fn read_funcs(&mut self, reader: &mut impl Read) -> std::io::Result<()> {
         let num_funcs = deserialize_size(reader)?;
-        let mut funcs = HashMap::new();
+        let mut funcs: HashMap<_, _> = standard_functions()
+            .into_iter()
+            .filter_map(|(name, f)| {
+                if let FnDecl::Native(f) = f {
+                    Some((name, FnDef::Native(f)))
+                } else {
+                    None
+                }
+            })
+            .collect();
         for _ in 0..num_funcs {
             let name = deserialize_str(reader)?;
-            funcs.insert(name, FnDef::deserialize(reader)?);
+            funcs.insert(name, FnDef::User(FnByteCode::deserialize(reader)?));
         }
         self.funcs = funcs;
         Ok(())
@@ -807,6 +730,10 @@ impl ByteCode {
             .funcs
             .get(fn_name)
             .ok_or_else(|| format!("Function {fn_name:?} was not found"))?;
+        let fn_def = match fn_def {
+            FnDef::User(user) => user,
+            FnDef::Native(n) => return Ok((*n.code)(args)),
+        };
         let mut stack = args.to_vec();
         let mut ip = 0;
 
@@ -829,33 +756,28 @@ impl ByteCode {
                     let top = stack.last().unwrap().clone();
                     stack.extend((0..instruction.arg0).map(|_| top.clone()));
                 }
-                OpCode::Add => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs + rhs),
-                OpCode::Sub => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs - rhs),
-                OpCode::Mul => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs * rhs),
-                OpCode::Div => self.interpret_bin_op(&mut stack, |lhs, rhs| lhs / rhs),
+                OpCode::Add => self.interpret_bin_op_str(
+                    &mut stack,
+                    |lhs, rhs| lhs + rhs,
+                    |lhs, rhs| lhs + rhs,
+                    |lhs, rhs| Some(format!("{lhs}{rhs}")),
+                ),
+                OpCode::Sub => {
+                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs - rhs, |lhs, rhs| lhs - rhs)
+                }
+                OpCode::Mul => {
+                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs * rhs, |lhs, rhs| lhs * rhs)
+                }
+                OpCode::Div => {
+                    self.interpret_bin_op(&mut stack, |lhs, rhs| lhs / rhs, |lhs, rhs| lhs / rhs)
+                }
                 OpCode::Call => {
                     let args = &stack[stack.len() - instruction.arg0 as usize..];
                     let fname = &stack[stack.len() - instruction.arg0 as usize - 1];
                     let Value::Str(fname) = fname else {
                         panic!("Function name shall be a string: {fname:?}");
                     };
-                    let res = match fname as &str {
-                        "sqrt" => unary_fn(f64::sqrt)(args),
-                        "sin" => unary_fn(f64::sin)(args),
-                        "cos" => unary_fn(f64::cos)(args),
-                        "tan" => unary_fn(f64::tan)(args),
-                        "asin" => unary_fn(f64::asin)(args),
-                        "acos" => unary_fn(f64::acos)(args),
-                        "atan" => unary_fn(f64::atan)(args),
-                        "atan2" => binary_fn(f64::atan2)(args),
-                        "pow" => binary_fn(f64::powf)(args),
-                        "exp" => unary_fn(f64::exp)(args),
-                        "log" => binary_fn(f64::log)(args),
-                        "log10" => unary_fn(f64::log10)(args),
-                        "print" => print_fn(args),
-                        "puts" => puts_fn(args),
-                        _ => self.interpret(fname, args)?,
-                    };
+                    let res = self.interpret(fname, args)?;
                     stack.resize(stack.len() - instruction.arg0 as usize - 1, Value::F64(0.));
                     stack.push(res);
                 }
@@ -870,14 +792,19 @@ impl ByteCode {
                         continue;
                     }
                 }
-                OpCode::Lt => {
-                    self.interpret_bin_op(&mut stack, |lhs, rhs| (lhs < rhs) as i32 as f64)
-                }
+                OpCode::Lt => self.interpret_bin_op(
+                    &mut stack,
+                    |lhs, rhs| (lhs < rhs) as i32 as f64,
+                    |lhs, rhs| (lhs < rhs) as i64,
+                ),
                 OpCode::Pop => {
                     stack.resize(stack.len() - instruction.arg0 as usize, Value::default());
                 }
                 OpCode::Ret => {
-                    return Ok(stack.pop().ok_or_else(|| "Stack underflow".to_string())?)
+                    return Ok(stack
+                        .get(stack.len() - instruction.arg0 as usize - 1)
+                        .ok_or_else(|| "Stack underflow".to_string())?
+                        .clone())
                 }
             }
             ip += 1
@@ -886,33 +813,40 @@ impl ByteCode {
         Ok(stack.pop().ok_or_else(|| "Stack underflow".to_string())?)
     }
 
-    fn interpret_bin_op(&self, stack: &mut Vec<Value>, op: impl FnOnce(f64, f64) -> f64) {
-        let rhs = stack.pop().expect("Stack underflow").coerce_f64();
-        let lhs = stack.pop().expect("Stack underflow").coerce_f64();
-        stack.push(Value::F64(op(lhs, rhs)));
+    fn interpret_bin_op_str(
+        &self,
+        stack: &mut Vec<Value>,
+        op_f64: impl FnOnce(f64, f64) -> f64,
+        op_i64: impl FnOnce(i64, i64) -> i64,
+        op_str: impl FnOnce(&str, &str) -> Option<String>,
+    ) {
+        use Value::*;
+        let rhs = stack.pop().expect("Stack underflow");
+        let lhs = stack.pop().expect("Stack underflow");
+        let res = match (lhs, rhs) {
+            (F64(lhs), F64(rhs)) => F64(op_f64(lhs, rhs)),
+            (I64(lhs), I64(rhs)) => I64(op_i64(lhs, rhs)),
+            (F64(lhs), I64(rhs)) => F64(op_f64(lhs, rhs as f64)),
+            (I64(lhs), F64(rhs)) => F64(op_f64(lhs as f64, rhs)),
+            (Str(lhs), Str(rhs)) => {
+                if let Some(res) = op_str(&lhs, &rhs) {
+                    Str(res)
+                } else {
+                    panic!("Operation not supported for strings: {lhs:?} {rhs:?}");
+                }
+            }
+            (lhs, rhs) => panic!("Operation not supported: {lhs:?} {rhs:?}"),
+        };
+        stack.push(res);
     }
-}
 
-fn unary_fn(f: fn(f64) -> f64) -> impl Fn(&[Value]) -> Value {
-    move |args| {
-        let arg = args.first().expect("functino missing argument");
-        let ret = f(arg.coerce_f64());
-        Value::F64(ret)
-    }
-}
-
-fn binary_fn(f: fn(f64, f64) -> f64) -> impl Fn(&[Value]) -> Value {
-    move |args| {
-        let mut args = args.iter();
-        let lhs = args
-            .next()
-            .expect("function missing the first argument")
-            .coerce_f64();
-        let rhs = args
-            .next()
-            .expect("function missing the second argument")
-            .coerce_f64();
-        Value::F64(f(lhs, rhs))
+    fn interpret_bin_op(
+        &self,
+        stack: &mut Vec<Value>,
+        op_f64: impl FnOnce(f64, f64) -> f64,
+        op_i64: impl FnOnce(i64, i64) -> i64,
+    ) {
+        self.interpret_bin_op_str(stack, op_f64, op_i64, |_, _| None);
     }
 }
 
@@ -928,7 +862,7 @@ fn compile(
         ))
     })?;
     let source = std::fs::read_to_string(src)?;
-    write_program(&source, writer, out_file, args.disasm, args.show_ast)
+    write_program(src, &source, writer, out_file, args.disasm, args.show_ast)
 }
 
 fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
@@ -937,16 +871,28 @@ fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
     Ok(bytecode)
 }
 
+enum FnDef {
+    User(FnByteCode),
+    Native(NativeFn<'static>),
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(args) = parse_args(true) else {
         return Ok(());
     };
 
     match args.run_mode {
+        RunMode::TypeCheck => {
+            if let Err(e) = compile(&mut std::io::sink(), &args, &args.output) {
+                eprintln!("TypeCheck error: {e}");
+            }
+        }
         RunMode::Compile => {
             let writer = std::fs::File::create(&args.output)?;
             let mut writer = BufWriter::new(writer);
-            compile(&mut writer, &args, &args.output)?;
+            if let Err(e) = compile(&mut writer, &args, &args.output) {
+                eprintln!("Compile Error: {e}");
+            }
         }
         RunMode::Run(code_file) => {
             let reader = std::fs::File::open(&code_file)?;
@@ -958,13 +904,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         RunMode::CompileAndRun => {
             let mut buf = vec![];
-            compile(&mut std::io::Cursor::new(&mut buf), &args, "<Memory>")?;
+            if let Err(e) = compile(&mut std::io::Cursor::new(&mut buf), &args, "<Memory>") {
+                eprintln!("Compile error: {e}");
+                return Ok(());
+            }
             let bytecode = read_program(&mut std::io::Cursor::new(&mut buf))?;
             if let Err(e) = bytecode.interpret("main", &[]) {
                 eprintln!("Runtime error: {e:?}");
             }
         }
-        _ => println!("Please specify -c, -r or -R as an argument"),
+        _ => println!("Please specify -c, -r, -t or -R as an argument"),
     }
     Ok(())
 }

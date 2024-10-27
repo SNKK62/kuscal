@@ -9,4 +9,4 @@ nom_locate = "4.2.0"
 
 [[bin]]
 name = "compile"
-path = "src/byte_compiler.rs"
+path = "src/compiler.rs"
