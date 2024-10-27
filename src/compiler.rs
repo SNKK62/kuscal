@@ -690,6 +690,11 @@ fn write_program(
     Ok(())
 }
 
+enum FnDef {
+    User(FnByteCode),
+    Native(NativeFn<'static>),
+}
+
 struct ByteCode {
     funcs: HashMap<String, FnDef>,
 }
@@ -869,11 +874,6 @@ fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
     let mut bytecode = ByteCode::new();
     bytecode.read_funcs(reader)?;
     Ok(bytecode)
-}
-
-enum FnDef {
-    User(FnByteCode),
-    Native(NativeFn<'static>),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
