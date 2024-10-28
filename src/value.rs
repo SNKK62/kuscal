@@ -1,5 +1,10 @@
+use super::Vm;
 use std::fmt::Display;
-use std::io::{Read, Write};
+use std::{
+    cell::RefCell,
+    io::{Read, Write},
+    rc::Rc,
+};
 
 pub fn serialize_size(sz: usize, writer: &mut impl Write) -> std::io::Result<()> {
     writer.write_all(&(sz as u32).to_le_bytes())
@@ -29,13 +34,27 @@ pub enum ValueKind {
     F64,
     I64,
     Str,
+    Coro,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     F64(f64),
     I64(i64),
     Str(String),
+    Coro(Rc<RefCell<Vm>>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        use Value::*;
+        match (self, other) {
+            (F64(lhs), F64(rhs)) => lhs == rhs,
+            (I64(lhs), I64(rhs)) => lhs == rhs,
+            (Str(lhs), Str(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
 }
 
 impl Default for Value {
@@ -50,6 +69,7 @@ impl Display for Value {
             Self::F64(value) => write!(f, "{value}"),
             Self::I64(value) => write!(f, "{value}"),
             Self::Str(value) => write!(f, "{value}"),
+            Self::Coro(_) => write!(f, "<Coroutine>"),
         }
     }
 }
@@ -60,6 +80,7 @@ impl Value {
             Self::F64(_) => ValueKind::F64,
             Self::I64(_) => ValueKind::I64,
             Self::Str(_) => ValueKind::Str,
+            Self::Coro(_) => ValueKind::Coro,
         }
     }
 
@@ -74,6 +95,12 @@ impl Value {
                 writer.write_all(&value.to_le_bytes())?;
             }
             Self::Str(value) => serialize_str(value, writer)?,
+            Self::Coro(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Coroutine can't be serialized",
+                ))
+            }
         };
         Ok(())
     }
@@ -129,6 +156,7 @@ impl Value {
             Self::F64(value) => format!("{value}"),
             Self::I64(value) => format!("{value}"),
             Self::Str(value) => value.clone(),
+            _ => panic!("Coercion failed: {:?} cannot be coerced to str", self),
         }
     }
 }

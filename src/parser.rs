@@ -154,6 +154,7 @@ pub enum TypeDecl {
     F64,
     I64,
     Str,
+    Coro,
 }
 
 fn tc_coerce_type<'src>(
@@ -169,6 +170,7 @@ fn tc_coerce_type<'src>(
         (F64, I64) => F64,
         (I64, I64) => I64,
         (Str, Str) => Str,
+        (Coro, Coro) => Coro,
         _ => {
             return Err(TypeCheckError::new(
                 format!("{:?} cannot be assigned to {:?}", value, target),
@@ -356,6 +358,10 @@ fn tc_expr<'src>(
                 true_type
             }
         }
+        Await(ex) => {
+            let _res = tc_expr(ex, ctx)?;
+            TypeDecl::Any
+        }
     })
 }
 
@@ -381,12 +387,14 @@ pub fn type_check<'src>(
                 args,
                 ret_type,
                 stmts,
+                cofn,
             } => {
                 ctx.funcs.insert(
                     name.to_string(),
                     FnDecl::User(UserFn {
                         args: args.clone(),
                         ret_type: *ret_type,
+                        cofn: *cofn,
                     }),
                 );
                 let mut subctx = TypeCheckContext::push_stack(ctx);
@@ -446,7 +454,13 @@ impl<'src> FnDecl<'src> {
 
     fn ret_type(&self) -> TypeDecl {
         match self {
-            Self::User(user) => user.ret_type,
+            Self::User(user) => {
+                if user.cofn {
+                    TypeDecl::Coro
+                } else {
+                    user.ret_type
+                }
+            }
             Self::Native(native) => native.ret_type,
         }
     }
@@ -455,6 +469,7 @@ impl<'src> FnDecl<'src> {
 pub struct UserFn<'src> {
     args: Vec<(Span<'src>, TypeDecl)>,
     ret_type: TypeDecl,
+    cofn: bool,
 }
 
 type NativeFnCode = dyn Fn(&[Value]) -> Value;
@@ -481,6 +496,7 @@ pub enum ExprEnum<'src> {
         Box<Statements<'src>>,
         Option<Box<Statements<'src>>>,
     ),
+    Await(Box<Expression<'src>>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -523,6 +539,7 @@ pub enum Statement<'src> {
         args: Vec<(Span<'src>, TypeDecl)>,
         ret_type: TypeDecl,
         stmts: Statements<'src>,
+        cofn: bool,
     },
     Return(Expression<'src>),
     Yield(Expression<'src>),
@@ -732,8 +749,18 @@ fn if_expr(i0: Span) -> IResult<Span, Expression> {
     ))
 }
 
+fn await_expr(i: Span) -> IResult<Span, Expression> {
+    let i0 = i;
+    let (i, _) = space_delimited(tag("await"))(i)?;
+    let (i, ex) = cut(space_delimited(expr))(i)?;
+    Ok((
+        i,
+        Expression::new(ExprEnum::Await(Box::new(ex)), calc_offset(i0, i)),
+    ))
+}
+
 pub fn expr(i: Span) -> IResult<Span, Expression> {
-    alt((if_expr, cond_expr, num_expr))(i)
+    alt((await_expr, if_expr, cond_expr, num_expr))(i)
 }
 
 fn var_def(i: Span) -> IResult<Span, Statement> {
@@ -812,6 +839,7 @@ fn type_decl(i: Span) -> IResult<Span, TypeDecl> {
             "i64" => TypeDecl::I64,
             "f64" => TypeDecl::F64,
             "str" => TypeDecl::Str,
+            "cofn" => TypeDecl::Coro,
             _ => {
                 return Err(nom::Err::Failure(nom::error::Error::new(
                     td,
@@ -830,7 +858,7 @@ fn argument(i: Span) -> IResult<Span, (Span, TypeDecl)> {
 }
 
 fn fn_def_statement(i: Span) -> IResult<Span, Statement> {
-    let (i, _) = space_delimited(tag("fn"))(i)?;
+    let (i, fn_kw) = space_delimited(alt((tag("cofn"), tag("fn"))))(i)?;
     let (i, (name, args, ret_type, stmts)) = cut(|i| {
         let (i, name) = space_delimited(identifier)(i)?;
         let (i, _) = space_delimited(tag("("))(i)?;
@@ -849,6 +877,7 @@ fn fn_def_statement(i: Span) -> IResult<Span, Statement> {
             args,
             ret_type,
             stmts,
+            cofn: *fn_kw == "cofn",
         },
     ))
 }
