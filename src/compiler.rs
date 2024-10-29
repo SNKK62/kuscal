@@ -581,6 +581,25 @@ impl Compiler {
                     self.fixup_jmp(jf_inst);
                     self.fixup_breaks()?;
                 }
+                Statement::While { cond, stmts, .. } => {
+                    let inst_check_exit = self.instructions.len();
+                    let stk_before_cond = self.stack_top();
+
+                    let stk_cond = self.compile_expr(cond)?;
+                    self.add_copy_inst(stk_cond);
+                    let jf_inst = self.add_jf_inst();
+                    dprintln!("start in loop: {:?}", self.target_stack);
+
+                    self.loop_stack.push(LoopFrame::new(stk_before_cond));
+
+                    self.compile_stmts(stmts)?;
+                    self.fixup_continues()?;
+
+                    self.add_pop_until_inst(stk_before_cond);
+                    self.add_inst(OpCode::Jmp, inst_check_exit as u8);
+                    self.fixup_jmp(jf_inst);
+                    self.fixup_breaks()?;
+                }
                 Statement::Break => {
                     let start = self
                         .loop_stack
@@ -692,7 +711,7 @@ fn write_program(
     })?;
 
     if args.show_ast {
-        dprintln!("AST: {stmts:#?}");
+        println!("AST: {stmts:#?}");
     }
 
     match type_check(&stmts, &mut TypeCheckContext::new()) {

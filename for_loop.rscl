@@ -1,5 +1,5 @@
-var a = 10;
+var a: i64 = 2;
 
 for i in 0 to 3 {
-    print(a + i);
+    a + 1;
 }

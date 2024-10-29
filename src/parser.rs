@@ -419,6 +419,10 @@ pub fn type_check<'src>(
                 ctx.vars.insert(loop_var, TypeDecl::I64);
                 res = type_check(stmts, ctx)?;
             }
+            Statement::While { cond, stmts, .. } => {
+                tc_coerce_type(&tc_expr(cond, ctx)?, &TypeDecl::I64, cond.span)?;
+                res = type_check(stmts, ctx)?;
+            }
             Statement::Return(e) => {
                 return tc_expr(e, ctx);
             }
@@ -532,6 +536,11 @@ pub enum Statement<'src> {
         end: Expression<'src>,
         stmts: Statements<'src>,
     },
+    While {
+        span: Span<'src>,
+        cond: Expression<'src>,
+        stmts: Statements<'src>,
+    },
     Break,
     Continue,
     FnDef {
@@ -553,6 +562,7 @@ impl<'src> Statement<'src> {
             VarDef { span, .. } => *span,
             VarAssign { span, .. } => *span,
             For { span, .. } => *span,
+            While { span, .. } => *span,
             FnDef { name, stmts, .. } => calc_offset(*name, stmts.span()),
             Return(ex) => ex.span,
             Break | Continue => return None,
@@ -831,6 +841,24 @@ fn for_statement(i: Span) -> IResult<Span, Statement> {
     ))
 }
 
+fn while_statement(i: Span) -> IResult<Span, Statement> {
+    let i0 = i;
+    let (i, _) = space_delimited(tag("while"))(i)?;
+    let (i, (cond, stmts)) = cut(|i| {
+        let (i, cond) = space_delimited(expr)(i)?;
+        let (i, stmts) = delimited(open_brace, statements, close_brace)(i)?;
+        Ok((i, (cond, stmts)))
+    })(i)?;
+    Ok((
+        i,
+        Statement::While {
+            span: calc_offset(i0, i),
+            cond,
+            stmts,
+        },
+    ))
+}
+
 fn type_decl(i: Span) -> IResult<Span, TypeDecl> {
     let (i, td) = space_delimited(identifier)(i)?;
     Ok((
@@ -919,6 +947,7 @@ fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, S
             var_assign,
             fn_def_statement,
             for_statement,
+            while_statement,
             terminated(return_statement, terminator),
             terminated(break_statement, terminator),
             terminated(continue_statement, terminator),
