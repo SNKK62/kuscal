@@ -1,19 +1,17 @@
-use ruscal::{dprintln, parse_args, Args, RunMode};
+use crate::parser::{
+    standard_functions, statements_finish, type_check, ExprEnum, Expression, FnDecl, NativeFn,
+    Span, Statement, Statements, TypeCheckContext, TypeDecl,
+};
+use crate::value::{deserialize_size, deserialize_str, serialize_size, serialize_str, Value};
+use ruscal::{dprintln, Args, RunMode};
 use std::{
     cell::RefCell,
     collections::HashMap,
     error::Error,
     fmt::Display,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{Read, Write},
     rc::Rc,
 };
-mod parser;
-use crate::parser::{
-    standard_functions, statements_finish, type_check, ExprEnum, Expression, FnDecl, NativeFn,
-    Span, Statement, Statements, TypeCheckContext, TypeDecl,
-};
-mod value;
-use value::{deserialize_size, deserialize_str, serialize_size, serialize_str, Value};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -78,22 +76,22 @@ impl_op_from!(
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-struct Instruction {
+pub struct Instruction {
     op: OpCode,
     arg0: u8,
 }
 
 impl Instruction {
-    fn new(op: OpCode, arg0: u8) -> Self {
+    pub fn new(op: OpCode, arg0: u8) -> Self {
         Self { op, arg0 }
     }
 
-    fn serialize(&self, writer: &mut impl Write) -> Result<(), std::io::Error> {
+    pub fn serialize(&self, writer: &mut impl Write) -> Result<(), std::io::Error> {
         writer.write_all(&[self.op as u8, self.arg0])?;
         Ok(())
     }
 
-    fn deserialize(reader: &mut impl Read) -> Result<Self, std::io::Error> {
+    pub fn deserialize(reader: &mut impl Read) -> Result<Self, std::io::Error> {
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf)?;
         Ok(Self::new(buf[0].into(), buf[1]))
@@ -711,7 +709,7 @@ fn write_program(
     })?;
 
     if args.show_ast {
-        println!("AST: {stmts:#?}");
+        dprintln!("AST: {stmts:#?}");
     }
 
     match type_check(&stmts, &mut TypeCheckContext::new()) {
@@ -752,7 +750,7 @@ enum FnDef {
     Native(NativeFn<'static>),
 }
 
-struct ByteCode {
+pub struct ByteCode {
     funcs: HashMap<String, FnDef>,
 }
 
@@ -784,7 +782,7 @@ impl ByteCode {
     }
 }
 
-enum YieldResult {
+pub enum YieldResult {
     Finished(Value),
     Suspend(Value),
 }
@@ -813,7 +811,7 @@ impl StackFrame {
     }
 }
 
-struct Vm {
+pub struct Vm {
     bytecode: Rc<ByteCode>,
     stack_frames: Vec<StackFrame>,
 }
@@ -825,7 +823,7 @@ impl std::fmt::Debug for Vm {
 }
 
 impl Vm {
-    fn new(bytecode: Rc<ByteCode>) -> Self {
+    pub fn new(bytecode: Rc<ByteCode>) -> Self {
         Self {
             bytecode,
             stack_frames: vec![],
@@ -868,7 +866,11 @@ impl Vm {
         }
     }
 
-    fn init_fn(&mut self, fn_name: &str, args: &[Value]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn init_fn(
+        &mut self,
+        fn_name: &str,
+        args: &[Value],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let fn_def = self
             .bytecode
             .funcs
@@ -912,7 +914,7 @@ impl Vm {
         Ok(None)
     }
 
-    fn interpret(&mut self) -> Result<YieldResult, Box<dyn std::error::Error>> {
+    pub fn interpret(&mut self) -> Result<YieldResult, Box<dyn std::error::Error>> {
         loop {
             let instruction = if let Some(instruction) = self.top()?.inst() {
                 instruction
@@ -1111,7 +1113,7 @@ impl Vm {
     }
 }
 
-fn compile(
+pub fn compile(
     writer: &mut impl Write,
     args: &Args,
     out_file: &str,
@@ -1126,13 +1128,13 @@ fn compile(
     write_program(src, &source, writer, out_file, args)
 }
 
-fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
+pub fn read_program(reader: &mut impl Read) -> std::io::Result<ByteCode> {
     let mut bytecode = ByteCode::new();
     bytecode.read_funcs(reader)?;
     Ok(bytecode)
 }
 
-fn debugger(vm: &Vm) -> bool {
+pub fn debugger(vm: &Vm) -> bool {
     println!("[c]ontinue/[p]rint/[e]xit/[bt]race?");
     loop {
         let mut buffer = String::new();
@@ -1148,63 +1150,4 @@ fn debugger(vm: &Vm) -> bool {
             }
         }
     }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(args) = parse_args(true) else {
-        return Ok(());
-    };
-
-    let run_coro = |mut vm: Vm| {
-        if let Err(e) = vm.init_fn("main", &[]) {
-            eprintln!("init_fn error: {e:?}");
-        }
-        loop {
-            match vm.interpret() {
-                Ok(YieldResult::Finished(_)) => break,
-                Ok(YieldResult::Suspend(value)) => {
-                    println!("Execution suspended with a yielded value {value}");
-                    if value == Value::Str("break".to_string()) && debugger(&vm) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Runtime error: {e:?}");
-                    break;
-                }
-            }
-        }
-    };
-
-    match args.run_mode {
-        RunMode::TypeCheck => {
-            if let Err(e) = compile(&mut std::io::sink(), &args, &args.output) {
-                eprintln!("TypeCheck error: {e}");
-            }
-        }
-        RunMode::Compile => {
-            let writer = std::fs::File::create(&args.output)?;
-            let mut writer = BufWriter::new(writer);
-            if let Err(e) = compile(&mut writer, &args, &args.output) {
-                eprintln!("Compile Error: {e}");
-            }
-        }
-        RunMode::Run(code_file) => {
-            let reader = std::fs::File::open(&code_file)?;
-            let mut reader = BufReader::new(reader);
-            let bytecode = Rc::new(read_program(&mut reader)?);
-            run_coro(Vm::new(bytecode));
-        }
-        RunMode::CompileAndRun => {
-            let mut buf = vec![];
-            if let Err(e) = compile(&mut std::io::Cursor::new(&mut buf), &args, "<Memory>") {
-                eprintln!("Compile error: {e}");
-                return Ok(());
-            }
-            let bytecode = Rc::new(read_program(&mut std::io::Cursor::new(&mut buf))?);
-            run_coro(Vm::new(bytecode));
-        }
-        _ => println!("Please specify -c, -r, -t or -R as an argument"),
-    }
-    Ok(())
 }
