@@ -18,7 +18,11 @@ use std::{
 pub enum OpCode {
     LoadLiteral,
     Store,
+    /// arg0 is target base stack index, pop the first value which is the index, and pop the second value to store
+    IndexStore,
     Copy,
+    /// arg0 is target base stack index, pop the first value which is the target index
+    IndexCopy,
     Dup,
     Add,
     Sub,
@@ -58,7 +62,9 @@ macro_rules! impl_op_from {
 impl_op_from!(
     LoadLiteral,
     Store,
+    IndexStore,
     Copy,
+    IndexCopy,
     Dup,
     Add,
     Sub,
@@ -79,22 +85,25 @@ impl_op_from!(
 pub struct Instruction {
     op: OpCode,
     arg0: u8,
+    // NOTE: for while statement, arg1 is for the stack adustment.
+    // in most opcodes, arg1 is not used.
+    arg1: u8,
 }
 
 impl Instruction {
-    pub fn new(op: OpCode, arg0: u8) -> Self {
-        Self { op, arg0 }
+    pub fn new(op: OpCode, arg0: u8, arg1: u8) -> Self {
+        Self { op, arg0, arg1 }
     }
 
     pub fn serialize(&self, writer: &mut impl Write) -> Result<(), std::io::Error> {
-        writer.write_all(&[self.op as u8, self.arg0])?;
+        writer.write_all(&[self.op as u8, self.arg0, self.arg1])?;
         Ok(())
     }
 
     pub fn deserialize(reader: &mut impl Read) -> Result<Self, std::io::Error> {
-        let mut buf = [0u8; 2];
+        let mut buf = [0u8; 3];
         reader.read_exact(&mut buf)?;
-        Ok(Self::new(buf[0].into(), buf[1]))
+        Ok(Self::new(buf[0].into(), buf[1], buf[2]))
     }
 }
 
@@ -248,9 +257,10 @@ fn disasm_common(
                 "   [{i}] {:?} {} ({:?})",
                 inst.op, inst.arg0, literals[inst.arg0 as usize]
             )?,
-            Copy | Dup | Call | Jmp | Jf | Pop | Store | Ret => {
+            Copy | IndexCopy | Dup | Call | Jmp | Pop | Store | IndexStore | Ret => {
                 writeln!(writer, "   [{i}] {:?} {}", inst.op, inst.arg0)?
             }
+            Jf => writeln!(writer, "   [{i}] {:?} {} {}", inst.op, inst.arg0, inst.arg1)?,
             _ => writeln!(writer, "   [{i}] {:?}", inst.op)?,
         }
     }
@@ -317,7 +327,7 @@ impl Compiler {
     // return the absolute position of inserted value
     fn add_inst(&mut self, op: OpCode, arg0: u8) -> InstPtr {
         let inst = self.instructions.len();
-        self.instructions.push(Instruction { op, arg0 });
+        self.instructions.push(Instruction { op, arg0, arg1: 0 });
         InstPtr(inst)
     }
 
@@ -327,6 +337,24 @@ impl Compiler {
             (self.target_stack.len() - stack_idx.0 - 1) as u8,
         );
         self.target_stack.push(Target::Temp);
+        inst
+    }
+
+    fn add_index_copy_inst(&mut self, stack_idx: StkIdx) -> InstPtr {
+        if self.target_stack.len() < stack_idx.0 + 1 {
+            eprintln!("Compiled bytecode so far:");
+            disasm_common(&self.literals, &self.instructions, &mut std::io::stderr()).unwrap();
+            panic!("Target stack underflow during compilation!");
+        }
+        println!("stack_idx: {:?}", stack_idx);
+        println!("stack: {:?}", self.target_stack);
+        println!("stack_length: {:?}", self.target_stack.len());
+        let inst = self.add_inst(
+            OpCode::IndexCopy,
+            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+        );
+        self.target_stack.pop(); // pop target array index
+        self.target_stack.push(Target::Temp); // push value to copy
         inst
     }
 
@@ -356,9 +384,38 @@ impl Compiler {
         inst
     }
 
-    fn add_jf_inst(&mut self) -> InstPtr {
+    fn add_index_store_inst(&mut self, stack_idx: StkIdx) -> InstPtr {
+        if self.target_stack.len() < stack_idx.0 + 1 {
+            eprintln!("Compiled bytecode so far:");
+            disasm_common(&self.literals, &self.instructions, &mut std::io::stderr()).unwrap();
+            panic!("Target stack underflow during compilation!");
+        }
+        let inst = self.add_inst(
+            OpCode::IndexStore,
+            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+        );
+        self.target_stack.pop(); // pop array index
+        self.target_stack.pop(); // pop value to store
+        inst
+    }
+
+    fn add_jf_inst(&mut self, coerce_size: Option<u8>) -> InstPtr {
         // push with jump address 0, because it will be set later
-        let inst = self.add_inst(OpCode::Jf, 0);
+        let inst = self.instructions.len();
+        if let Some(size) = coerce_size {
+            self.instructions.push(Instruction {
+                op: OpCode::Jf,
+                arg0: 0,
+                arg1: size,
+            });
+        } else {
+            self.instructions.push(Instruction {
+                op: OpCode::Jf,
+                arg0: 0,
+                arg1: (self.target_stack.len() - 1) as u8,
+            });
+        }
+        let inst = InstPtr(inst);
         self.target_stack.pop();
         inst
     }
@@ -413,6 +470,13 @@ impl Compiler {
                 self.add_load_literal_inst(id);
                 self.stack_top()
             }
+            ExprEnum::ArrayLiteral(arr) => {
+                arr.iter().for_each(|num| {
+                    let id = self.add_literal(Value::F64(*num));
+                    self.add_load_literal_inst(id);
+                });
+                StkIdx(self.stack_top().0 - (arr.len() - 1))
+            }
             ExprEnum::Ident(ident) => {
                 let var = self.target_stack.iter().enumerate().find(|(_i, tgt)| {
                     if let Target::Local(id) = tgt {
@@ -423,6 +487,26 @@ impl Compiler {
                 });
                 if let Some(var) = var {
                     return Ok(StkIdx(var.0));
+                } else {
+                    return Err(format!("Variable not found: {ident:?}").into());
+                }
+            }
+            ExprEnum::ArrayIndexAccess(ident, index) => {
+                let target_stack = &self.target_stack.clone();
+                let var = target_stack.iter().enumerate().find(|(_i, tgt)| {
+                    if let Target::Local(id) = tgt {
+                        id == ident.fragment()
+                    } else {
+                        false
+                    }
+                });
+
+                if let Some(var) = var {
+                    let index_ex_idx = self.compile_expr(index)?;
+                    println!("stack: {:?}", self.target_stack);
+                    self.add_copy_inst(index_ex_idx);
+                    self.add_index_copy_inst(StkIdx(var.0));
+                    self.stack_top()
                 } else {
                     return Err(format!("Variable not found: {ident:?}").into());
                 }
@@ -456,7 +540,7 @@ impl Compiler {
                 use OpCode::*;
                 let cond = self.compile_expr(cond)?;
                 self.add_copy_inst(cond);
-                let jf_inst = self.add_jf_inst();
+                let jf_inst = self.add_jf_inst(None);
                 let stack_size_before = self.target_stack.len();
                 self.compile_stmts_or_zero(true_branch)?;
                 self.coerce_stack(StkIdx(stack_size_before + 1));
@@ -519,12 +603,17 @@ impl Compiler {
                     last_result = Some(self.compile_expr(ex)?);
                 }
                 Statement::VarDef { name, ex, .. } => {
-                    let mut ex = self.compile_expr(ex)?;
-                    if !matches!(self.target_stack[ex.0], Target::Temp) {
-                        self.add_copy_inst(ex);
-                        ex = self.stack_top();
+                    let length = match ex.expr.to_owned() {
+                        ExprEnum::ArrayLiteral(arr) => arr.len(),
+                        _ => 1,
+                    };
+                    let stk_idx0 = self.compile_expr(ex)?;
+                    for i in 0..length {
+                        if !matches!(self.target_stack[stk_idx0.0 + i], Target::Temp) {
+                            self.add_copy_inst(StkIdx(stk_idx0.0 + i));
+                        }
                     }
-                    self.target_stack[ex.0] = Target::Local(name.to_string());
+                    self.target_stack[stk_idx0.0 + length] = Target::Local(name.to_string());
                 }
                 Statement::VarAssign { name, ex, .. } => {
                     let stk_ex = self.compile_expr(ex)?;
@@ -542,6 +631,27 @@ impl Compiler {
                         .ok_or_else(|| format!("Variable name not found: {name}"))?;
                     self.add_copy_inst(stk_ex);
                     self.add_store_inst(StkIdx(stk_local));
+                }
+                Statement::ArrayIndexAssign {
+                    name, index, ex, ..
+                } => {
+                    let index_stk_idx = self.compile_expr(index)?;
+                    let stk_ex = self.compile_expr(ex)?;
+                    let (stk_local, _) = self
+                        .target_stack
+                        .iter_mut()
+                        .enumerate()
+                        .find(|(_, tgt)| {
+                            if let Target::Local(tgt) = tgt {
+                                tgt == name.fragment()
+                            } else {
+                                false
+                            }
+                        })
+                        .ok_or_else(|| format!("Variable name not found: {name}"))?;
+                    self.add_copy_inst(stk_ex);
+                    self.add_copy_inst(index_stk_idx);
+                    self.add_index_store_inst(StkIdx(stk_local));
                 }
                 Statement::For {
                     loop_var,
@@ -562,7 +672,7 @@ impl Compiler {
                     self.add_copy_inst(stk_end);
                     dprintln!("before cmp: {:?}", self.target_stack);
                     self.add_binop_inst(OpCode::Lt);
-                    let jf_inst = self.add_jf_inst();
+                    let jf_inst = self.add_jf_inst(None);
                     dprintln!("start in loop: {:?}", self.target_stack);
                     self.loop_stack.push(LoopFrame::new(stk_loop_var));
                     self.compile_stmts(stmts)?;
@@ -583,9 +693,8 @@ impl Compiler {
                     let inst_check_exit = self.instructions.len();
                     let stk_before_cond = self.stack_top();
 
-                    let stk_cond = self.compile_expr(cond)?;
-                    self.add_copy_inst(stk_cond);
-                    let jf_inst = self.add_jf_inst();
+                    self.compile_expr(cond)?;
+                    let jf_inst = self.add_jf_inst(Some((stk_before_cond.0 + 1) as u8));
                     dprintln!("start in loop: {:?}", self.target_stack);
 
                     self.loop_stack.push(LoopFrame::new(stk_before_cond));
@@ -709,7 +818,8 @@ fn write_program(
     })?;
 
     if args.show_ast {
-        dprintln!("AST: {stmts:#?}");
+        // dprintln!("AST: {stmts:#?}");
+        println!("AST: {stmts:#?}");
     }
 
     match type_check(&stmts, &mut TypeCheckContext::new()) {
@@ -924,6 +1034,7 @@ impl Vm {
                 }
                 continue;
             };
+            // println!("- instruction: {:?}", instruction,);
 
             match instruction.op {
                 OpCode::LoadLiteral => {
@@ -938,9 +1049,40 @@ impl Vm {
                     let value = stack.pop().expect("Store needs an argument");
                     stack[idx] = value;
                 }
+                OpCode::IndexStore => {
+                    let stack = &mut self.top_mut()?.stack;
+                    let stack_length = stack.len();
+                    let array_index = stack.pop().expect("IndexStore needs an array index");
+                    // TODO: index should be i64 (or usize)
+                    let array_index = if let Value::F64(index) = array_index {
+                        index as usize
+                    } else if let Value::I64(index) = array_index {
+                        index as usize
+                    } else {
+                        return Err("IndexStore needs an array index".into());
+                    };
+                    let idx = stack_length - instruction.arg0 as usize + array_index - 1;
+                    let value = stack.pop().expect("IndexStore needs an argument");
+                    stack[idx] = value;
+                }
                 OpCode::Copy => {
                     let stack = &mut self.top_mut()?.stack;
                     stack.push(stack[stack.len() - instruction.arg0 as usize - 1].clone());
+                }
+                OpCode::IndexCopy => {
+                    let stack = &mut self.top_mut()?.stack;
+                    let stack_length = stack.len();
+                    let array_index = stack.pop().expect("IndexCopy needs an array index");
+                    // TODO: index should be i64 (or usize)
+                    let array_index = if let Value::F64(index) = array_index {
+                        index as usize
+                    } else if let Value::I64(index) = array_index {
+                        index as usize
+                    } else {
+                        return Err("IndexCopy needs an array index".into());
+                    };
+                    let idx = stack_length - instruction.arg0 as usize + array_index - 1;
+                    stack.push(stack[idx].clone());
                 }
                 OpCode::Dup => {
                     let stack = &mut self.top_mut()?.stack;
@@ -1021,6 +1163,9 @@ impl Vm {
                     let cond = stack.pop().expect("Jf needs an argument");
                     if cond.coerce_f64() == 0. {
                         self.top_mut()?.ip = instruction.arg0 as usize;
+                        self.top_mut()?
+                            .stack
+                            .resize(instruction.arg1 as usize, Value::F64(0.));
                         continue;
                     }
                 }
@@ -1068,6 +1213,7 @@ impl Vm {
                     };
                 }
             }
+            // println!("stack: {:?}", self.top()?.stack);
             self.top_mut()?.ip += 1;
         }
     }

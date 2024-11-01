@@ -148,12 +148,13 @@ pub fn standard_functions<'src>() -> Functions<'src> {
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TypeDecl {
     Any,
     F64,
     I64,
     Str,
+    Array, // INFO: only f64 array is supported
     Coro,
 }
 
@@ -164,13 +165,14 @@ fn tc_coerce_type<'src>(
 ) -> Result<TypeDecl, TypeCheckError<'src>> {
     use TypeDecl::*;
     Ok(match (value, target) {
-        (_, Any) => *value,
-        (Any, _) => *target,
+        (_, Any) => value.clone(),
+        (Any, _) => value.clone(),
         (F64 | I64, F64) => F64,
         (F64, I64) => F64,
         (I64, I64) => I64,
         (Str, Str) => Str,
         (Coro, Coro) => Coro,
+        (Array, Array) => Array,
         _ => {
             return Err(TypeCheckError::new(
                 format!("{:?} cannot be assigned to {:?}", value, target),
@@ -199,7 +201,7 @@ impl<'src, 'ctx> TypeCheckContext<'src, 'ctx> {
 
     pub fn get_var(&self, name: &str) -> Option<TypeDecl> {
         match self.vars.get(name) {
-            Some(val) => Some(*val),
+            Some(val) => Some(val.clone()),
             None => match self.super_context {
                 Some(super_ctx) => super_ctx.get_var(name),
                 None => None,
@@ -295,7 +297,7 @@ fn tc_binary_cmp<'src>(
     Ok(match (&lhst, &rhst) {
         (Any, _) => I64,
         (_, Any) => I64,
-        (F64, F64) => I64,
+        (I64 | F64, F64) => I64,
         (I64, I64) => I64,
         (Str, Str) => I64,
         _ => {
@@ -318,6 +320,23 @@ fn tc_expr<'src>(
     Ok(match &e.expr {
         NumLiteral(_val) => TypeDecl::F64,
         StrLiteral(_val) => TypeDecl::Str,
+        ArrayLiteral(_val) => TypeDecl::Array,
+        ArrayIndexAccess(name, index, ..) => {
+            let var = ctx.get_var(name).ok_or_else(|| {
+                TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
+            })?;
+            // TODO: index should be i64
+            if TypeDecl::Array == var
+                && (tc_expr(index, ctx)? == TypeDecl::F64 || tc_expr(index, ctx)? == TypeDecl::I64)
+            {
+                TypeDecl::F64
+            } else {
+                return Err(TypeCheckError::new(
+                    format!("Variable \"{}\" is not an array", name),
+                    e.span,
+                ));
+            }
+        }
         Ident(name) => ctx.get_var(name).ok_or_else(|| {
             TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
         })?,
@@ -382,6 +401,12 @@ pub fn type_check<'src>(
                 let target = ctx.vars.get(**name).expect("Variable not found");
                 tc_coerce_type(&init_type, target, ex.span)?;
             }
+            Statement::ArrayIndexAssign { name, ex, .. } => {
+                let init_type = tc_expr(ex, ctx)?;
+                // TODO: now only f64 array is supported
+                let _ = ctx.vars.get(**name).expect("Variable not found");
+                tc_coerce_type(&init_type, &TypeDecl::F64, ex.span)?;
+            }
             Statement::FnDef {
                 name,
                 args,
@@ -393,13 +418,13 @@ pub fn type_check<'src>(
                     name.to_string(),
                     FnDecl::User(UserFn {
                         args: args.clone(),
-                        ret_type: *ret_type,
+                        ret_type: ret_type.clone(),
                         cofn: *cofn,
                     }),
                 );
                 let mut subctx = TypeCheckContext::push_stack(ctx);
                 for (arg, ty) in args.iter() {
-                    subctx.vars.insert(arg, *ty);
+                    subctx.vars.insert(arg, ty.clone());
                 }
                 let last_stmt = type_check(stmts, &mut subctx)?;
                 tc_coerce_type(&last_stmt, ret_type, stmts.span())?;
@@ -450,7 +475,7 @@ impl<'src> FnDecl<'src> {
             Self::User(user) => user
                 .args
                 .iter()
-                .map(|(name, ty)| (*name.fragment(), *ty))
+                .map(|(name, ty)| (*name.fragment(), ty.clone()))
                 .collect(),
             Self::Native(native) => native.args.clone(),
         }
@@ -462,10 +487,10 @@ impl<'src> FnDecl<'src> {
                 if user.cofn {
                     TypeDecl::Coro
                 } else {
-                    user.ret_type
+                    user.ret_type.clone()
                 }
             }
-            Self::Native(native) => native.ret_type,
+            Self::Native(native) => native.ret_type.clone(),
         }
     }
 }
@@ -488,6 +513,8 @@ pub enum ExprEnum<'src> {
     Ident(Span<'src>),
     NumLiteral(f64),
     StrLiteral(String),
+    ArrayLiteral(Vec<f64>), // INFO: only f64 array is supported
+    ArrayIndexAccess(Span<'src>, Box<Expression<'src>>),
     FnInvoke(Span<'src>, Vec<Expression<'src>>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -529,6 +556,12 @@ pub enum Statement<'src> {
         name: Span<'src>,
         ex: Expression<'src>,
     },
+    ArrayIndexAssign {
+        span: Span<'src>,
+        name: Span<'src>,
+        index: Expression<'src>,
+        ex: Expression<'src>,
+    },
     For {
         span: Span<'src>,
         loop_var: Span<'src>,
@@ -561,6 +594,7 @@ impl<'src> Statement<'src> {
             Expression(ex) => ex.span,
             VarDef { span, .. } => *span,
             VarAssign { span, .. } => *span,
+            ArrayIndexAssign { span, .. } => *span,
             For { span, .. } => *span,
             While { span, .. } => *span,
             FnDef { name, stmts, .. } => calc_offset(*name, stmts.span()),
@@ -597,7 +631,14 @@ fn calc_offset<'a>(i: Span<'a>, r: Span<'a>) -> Span<'a> {
 }
 
 fn factor(i: Span) -> IResult<Span, Expression> {
-    alt((str_literal, num_literal, func_call, ident, parens))(i)
+    alt((
+        str_literal,
+        num_literal,
+        func_call,
+        array_index_access,
+        ident,
+        parens,
+    ))(i)
 }
 
 fn func_call(i: Span) -> IResult<Span, Expression> {
@@ -686,6 +727,35 @@ fn num_literal(input: Span) -> IResult<Span, Expression> {
     ))
 }
 
+fn array_literal(input: Span) -> IResult<Span, Expression> {
+    let (r, _) = preceded(multispace0, char('['))(input)?;
+    let (r, (v, span)) = cut(|i| {
+        let (i, v) =
+            separated_list0(space_delimited(char(',')), space_delimited(recognize_float))(i)?;
+        let (i, _) = space_delimited(char(']'))(i)?;
+        Ok((i, (v.iter().map(|s| s.parse().unwrap()).collect(), v)))
+    })(r)?;
+    Ok((
+        r,
+        Expression::new(ExprEnum::ArrayLiteral(v), span.last().cloned().unwrap()), // TODO: fix span
+    ))
+}
+
+fn array_index_access(i: Span) -> IResult<Span, Expression> {
+    let (r, name) = space_delimited(identifier)(i)?;
+    let (r, _) = space_delimited(char('['))(r)?;
+    // TODO: to be nom::combinator::cut
+    let (r, index) = space_delimited(expr)(r)?;
+    let (r, _) = space_delimited(char(']'))(r)?;
+    Ok((
+        r,
+        Expression::new(
+            ExprEnum::ArrayIndexAccess(name, Box::new(index)), // TODO: fix index
+            i,
+        ),
+    ))
+}
+
 fn parens(i: Span) -> IResult<Span, Expression> {
     space_delimited(delimited(tag("("), expr, tag(")")))(i)
 }
@@ -770,7 +840,7 @@ fn await_expr(i: Span) -> IResult<Span, Expression> {
 }
 
 pub fn expr(i: Span) -> IResult<Span, Expression> {
-    alt((await_expr, if_expr, cond_expr, num_expr))(i)
+    alt((await_expr, if_expr, cond_expr, num_expr, array_literal))(i)
 }
 
 fn var_def(i: Span) -> IResult<Span, Statement> {
@@ -807,6 +877,27 @@ fn var_assign(i: Span) -> IResult<Span, Statement> {
         Statement::VarAssign {
             span: calc_offset(span, i),
             name,
+            ex,
+        },
+    ))
+}
+
+fn array_index_assign(i: Span) -> IResult<Span, Statement> {
+    let span = i;
+    let (i, name) = space_delimited(identifier)(i)?;
+    let (i, _) = space_delimited(char('['))(i)?;
+    // TODO: to be nom::combinator::cut
+    let (i, index) = space_delimited(expr)(i)?;
+    let (i, _) = space_delimited(char(']'))(i)?;
+    let (i, _) = space_delimited(char('='))(i)?;
+    let (i, ex) = space_delimited(expr)(i)?;
+    let (i, _) = space_delimited(char(';'))(i)?;
+    Ok((
+        i,
+        Statement::ArrayIndexAssign {
+            span: calc_offset(span, i),
+            name,
+            index,
             ex,
         },
     ))
@@ -867,6 +958,7 @@ fn type_decl(i: Span) -> IResult<Span, TypeDecl> {
             "i64" => TypeDecl::I64,
             "f64" => TypeDecl::F64,
             "str" => TypeDecl::Str,
+            "Array" => TypeDecl::Array,
             "cofn" => TypeDecl::Coro,
             _ => {
                 return Err(nom::Err::Failure(nom::error::Error::new(
@@ -945,6 +1037,7 @@ fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, S
         alt((
             var_def,
             var_assign,
+            array_index_assign,
             fn_def_statement,
             for_statement,
             while_statement,
