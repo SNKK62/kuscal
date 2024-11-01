@@ -1,0 +1,8 @@
+fn early_return(a: f64, b: f64) -> f64 {
+    var one: f64 = 1;
+    if one {
+        return a;
+    };
+    b
+}
+print(early_return(1, 2));

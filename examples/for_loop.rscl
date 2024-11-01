@@ -1,5 +1,7 @@
 var a: f64 = 2;
 
 for i in 0 to 3 {
-    a + 1;
+    a = a + 1;
 }
+
+print(a);

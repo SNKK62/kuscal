@@ -613,12 +613,23 @@ impl Compiler {
                         _ => 1,
                     };
                     let stk_idx0 = self.compile_expr(ex)?;
+                    let mut is_name_assigned = false;
                     for i in 0..length {
+                        println!("before stack: {:?}", self.target_stack);
                         if !matches!(self.target_stack[stk_idx0.0 + i], Target::Temp) {
                             self.add_copy_inst(StkIdx(stk_idx0.0 + i));
+                            if i == 0 {
+                                self.target_stack[stk_idx0.0 + length] =
+                                    Target::Local(name.to_string());
+                                is_name_assigned = true;
+                            }
+                            println!("stack: {:?}", self.target_stack);
+                        }
+                        if i == 0 && !is_name_assigned {
+                            self.target_stack[stk_idx0.0] = Target::Local(name.to_string());
+                            is_name_assigned = true;
                         }
                     }
-                    self.target_stack[stk_idx0.0 + length] = Target::Local(name.to_string());
                 }
                 Statement::VarAssign { name, ex, .. } => {
                     let stk_ex = self.compile_expr(ex)?;
@@ -1041,6 +1052,7 @@ impl Vm {
                 }
                 continue;
             };
+            // debug instruction
             // println!("- instruction: {:?}", instruction,);
 
             match instruction.op {
@@ -1220,6 +1232,7 @@ impl Vm {
                     };
                 }
             }
+            // debug stack
             // println!("stack: {:?}", self.top()?.stack);
             self.top_mut()?.ip += 1;
         }
