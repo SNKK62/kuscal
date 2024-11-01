@@ -478,13 +478,18 @@ impl Compiler {
                 StkIdx(self.stack_top().0 - (arr.len() - 1))
             }
             ExprEnum::Ident(ident) => {
-                let var = self.target_stack.iter().enumerate().find(|(_i, tgt)| {
-                    if let Target::Local(id) = tgt {
-                        id == ident.fragment()
-                    } else {
-                        false
-                    }
-                });
+                let var = self
+                    .target_stack
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_i, tgt)| {
+                        if let Target::Local(id) = tgt {
+                            id == ident.fragment()
+                        } else {
+                            false
+                        }
+                    });
                 if let Some(var) = var {
                     return Ok(StkIdx(var.0));
                 } else {
@@ -493,7 +498,7 @@ impl Compiler {
             }
             ExprEnum::ArrayIndexAccess(ident, index) => {
                 let target_stack = &self.target_stack.clone();
-                let var = target_stack.iter().enumerate().find(|(_i, tgt)| {
+                let var = target_stack.iter().enumerate().rev().find(|(_i, tgt)| {
                     if let Target::Local(id) = tgt {
                         id == ident.fragment()
                     } else {
@@ -621,6 +626,7 @@ impl Compiler {
                         .target_stack
                         .iter_mut()
                         .enumerate()
+                        .rev()
                         .find(|(_, tgt)| {
                             if let Target::Local(tgt) = tgt {
                                 tgt == name.fragment()
@@ -641,6 +647,7 @@ impl Compiler {
                         .target_stack
                         .iter_mut()
                         .enumerate()
+                        .rev()
                         .find(|(_, tgt)| {
                             if let Target::Local(tgt) = tgt {
                                 tgt == name.fragment()

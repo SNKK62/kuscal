@@ -1,0 +1,11 @@
+var a: f64 = 0;
+print(a);
+
+a = 2;
+print(a);
+
+var a: f64 = 1;
+print(a);
+
+a = 4;
+print(a);
