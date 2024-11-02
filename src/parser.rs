@@ -358,6 +358,7 @@ fn tc_expr<'src>(
         Sub(lhs, rhs) => tc_binary_op(lhs, rhs, ctx, "Sub")?,
         Mul(lhs, rhs) => tc_binary_op(lhs, rhs, ctx, "Mul")?,
         Div(lhs, rhs) => tc_binary_op(lhs, rhs, ctx, "Div")?,
+        And(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "And")?,
         Gt(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "GT")?,
         Lt(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "LT")?,
         Eq(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "Eq")?,
@@ -535,6 +536,7 @@ pub enum ExprEnum<'src> {
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
     Mul(Box<Expression<'src>>, Box<Expression<'src>>),
     Div(Box<Expression<'src>>, Box<Expression<'src>>),
+    And(Box<Expression<'src>>, Box<Expression<'src>>),
     Gt(Box<Expression<'src>>, Box<Expression<'src>>),
     Lt(Box<Expression<'src>>, Box<Expression<'src>>),
     Eq(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -805,7 +807,7 @@ fn num_expr(i: Span) -> IResult<Span, Expression> {
 
 fn cond_expr(i0: Span) -> IResult<Span, Expression> {
     let (i, first) = num_expr(i0)?;
-    let (i, cond) = space_delimited(alt((tag("<"), tag(">"), tag("=="), tag("!="))))(i)?;
+    let (i, cond) = space_delimited(alt((tag("&&"), tag("<"), tag(">"), tag("=="), tag("!="))))(i)?;
     let (i, second) = num_expr(i)?;
     let span = calc_offset(i0, i);
     Ok((
@@ -815,6 +817,7 @@ fn cond_expr(i0: Span) -> IResult<Span, Expression> {
             ">" => Expression::new(ExprEnum::Gt(Box::new(first), Box::new(second)), span),
             "==" => Expression::new(ExprEnum::Eq(Box::new(first), Box::new(second)), span),
             "!=" => Expression::new(ExprEnum::Neq(Box::new(first), Box::new(second)), span),
+            "&&" => Expression::new(ExprEnum::And(Box::new(first), Box::new(second)), span),
             _ => unreachable!(),
         },
     ))

@@ -28,6 +28,7 @@ pub enum OpCode {
     Sub,
     Mul,
     Div,
+    And,
     Call,
     Jmp,
     /// Jump if false
@@ -72,6 +73,7 @@ impl_op_from!(
     Sub,
     Mul,
     Div,
+    And,
     Call,
     Jmp,
     Jf,
@@ -524,6 +526,7 @@ impl Compiler {
             ExprEnum::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs)?,
             ExprEnum::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs)?,
             ExprEnum::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs)?,
+            ExprEnum::And(lhs, rhs) => self.bin_op(OpCode::And, lhs, rhs)?,
             ExprEnum::Not(ex) => {
                 let res = self.compile_expr(ex)?;
                 self.add_copy_inst(res);
@@ -1149,6 +1152,11 @@ impl Vm {
                     &mut self.top_mut()?.stack,
                     |lhs, rhs| lhs / rhs,
                     |lhs, rhs| lhs / rhs,
+                ),
+                OpCode::And => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
+                    |lhs, rhs| (lhs != 0. && rhs != 0.) as i32 as f64,
+                    |lhs, rhs| (lhs != 0 && rhs != 0) as i64,
                 ),
                 OpCode::Call => {
                     let stack = &self.top()?.stack;
