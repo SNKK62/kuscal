@@ -154,7 +154,7 @@ pub enum TypeDecl {
     F64,
     I64,
     Str,
-    Array, // INFO: only f64 array is supported
+    Array(Box<TypeDecl>, usize), // (type, length)
     Coro,
 }
 
@@ -171,8 +171,8 @@ fn tc_coerce_type<'src>(
         (F64, I64) => F64,
         (I64, I64) => I64,
         (Str, Str) => Str,
+        (Array(_, _), Array(_, _)) => Array(Box::new(Any), 0), // TODO: refine array type coerce
         (Coro, Coro) => Coro,
-        (Array, Array) => Array,
         _ => {
             return Err(TypeCheckError::new(
                 format!("{:?} cannot be assigned to {:?}", value, target),
@@ -320,21 +320,31 @@ fn tc_expr<'src>(
     Ok(match &e.expr {
         NumLiteral(_val) => TypeDecl::F64,
         StrLiteral(_val) => TypeDecl::Str,
-        ArrayLiteral(_val) => TypeDecl::Array,
+        // TODO: fix array type
+        ArrayLiteral(_val) => TypeDecl::Array(Box::new(TypeDecl::Any), 0),
         ArrayIndexAccess(name, index, ..) => {
             let var = ctx.get_var(name).ok_or_else(|| {
                 TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
             })?;
             // TODO: index should be i64
-            if TypeDecl::Array == var
-                && (tc_expr(index, ctx)? == TypeDecl::F64 || tc_expr(index, ctx)? == TypeDecl::I64)
-            {
-                TypeDecl::F64
-            } else {
-                return Err(TypeCheckError::new(
-                    format!("Variable \"{}\" is not an array", name),
-                    e.span,
-                ));
+            match var {
+                TypeDecl::Array(ty, _) => {
+                    if tc_expr(index, ctx)? != TypeDecl::F64
+                        && tc_expr(index, ctx)? != TypeDecl::I64
+                    {
+                        return Err(TypeCheckError::new(
+                            "index should be f64 or i64".to_string(),
+                            e.span,
+                        ));
+                    }
+                    *ty
+                }
+                _ => {
+                    return Err(TypeCheckError::new(
+                        format!("Variable \"{}\" is not an array", name),
+                        e.span,
+                    ))
+                }
             }
         }
         Ident(name) => ctx.get_var(name).ok_or_else(|| {
@@ -420,9 +430,17 @@ pub fn type_check<'src>(
             }
             Statement::ArrayIndexAssign { name, ex, .. } => {
                 let init_type = tc_expr(ex, ctx)?;
-                // TODO: now only f64 array is supported
-                let _ = ctx.vars.get(**name).expect("Variable not found");
-                tc_coerce_type(&init_type, &TypeDecl::F64, ex.span)?;
+                let arr = ctx.vars.get(**name).expect("Variable not found");
+                let ty = match arr {
+                    TypeDecl::Array(ty, _) => ty,
+                    _ => {
+                        return Err(TypeCheckError::new(
+                            format!("Variable \"{}\" is not an array", name),
+                            ex.span,
+                        ))
+                    }
+                };
+                tc_coerce_type(&init_type, ty, ex.span)?; // TODO: fix array type
             }
             Statement::FnDef {
                 name,
@@ -530,7 +548,7 @@ pub enum ExprEnum<'src> {
     Ident(Span<'src>),
     NumLiteral(f64),
     StrLiteral(String),
-    ArrayLiteral(Vec<f64>), // INFO: only f64 array is supported
+    ArrayLiteral(Vec<Expression<'src>>), // INFO: only 1d array is supported
     ArrayIndexAccess(Span<'src>, Box<Expression<'src>>),
     FnInvoke(Span<'src>, Vec<Expression<'src>>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -753,14 +771,16 @@ fn num_literal(input: Span) -> IResult<Span, Expression> {
 fn array_literal(input: Span) -> IResult<Span, Expression> {
     let (r, _) = preceded(multispace0, char('['))(input)?;
     let (r, (v, span)) = cut(|i| {
-        let (i, v) =
-            separated_list0(space_delimited(char(',')), space_delimited(recognize_float))(i)?;
+        let (i, v) = separated_list0(
+            space_delimited(char(',')),
+            space_delimited(alt((array_literal, num_literal, str_literal))),
+        )(i)?;
         let (i, _) = space_delimited(char(']'))(i)?;
-        Ok((i, (v.iter().map(|s| s.parse().unwrap()).collect(), v)))
+        Ok((i, (v, i)))
     })(r)?;
     Ok((
         r,
-        Expression::new(ExprEnum::ArrayLiteral(v), span.last().cloned().unwrap()), // TODO: fix span
+        Expression::new(ExprEnum::ArrayLiteral(v), span), // TODO: fix span
     ))
 }
 
@@ -992,22 +1012,30 @@ fn while_statement(i: Span) -> IResult<Span, Statement> {
 
 fn type_decl(i: Span) -> IResult<Span, TypeDecl> {
     let (i, td) = space_delimited(identifier)(i)?;
-    Ok((
-        i,
-        match *td.fragment() {
-            "i64" => TypeDecl::I64,
-            "f64" => TypeDecl::F64,
-            "str" => TypeDecl::Str,
-            "Array" => TypeDecl::Array,
-            "cofn" => TypeDecl::Coro,
-            _ => {
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    td,
-                    nom::error::ErrorKind::Verify,
-                )))
-            }
-        },
-    ))
+    match *td.fragment() {
+        "i64" => Ok((i, TypeDecl::I64)),
+        "f64" => Ok((i, TypeDecl::F64)),
+        "str" => Ok((i, TypeDecl::Str)),
+        "Array" => {
+            let (i, td) = delimited(
+                space_delimited(tag("<")),
+                type_decl,
+                space_delimited(tag(">")),
+            )(i)?;
+            let (i, len) = delimited(
+                space_delimited(tag("[")),
+                space_delimited(recognize_float), // TODO: index should be usize
+                space_delimited(tag("]")),
+            )(i)?;
+
+            Ok((i, TypeDecl::Array(Box::new(td), len.parse().unwrap())))
+        }
+        "cofn" => Ok((i, TypeDecl::Coro)),
+        _ => Err(nom::Err::Failure(nom::error::Error::new(
+            td,
+            nom::error::ErrorKind::Verify,
+        ))),
+    }
 }
 
 fn argument(i: Span) -> IResult<Span, (Span, TypeDecl)> {

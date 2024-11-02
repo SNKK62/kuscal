@@ -476,11 +476,23 @@ impl Compiler {
                 self.stack_top()
             }
             ExprEnum::ArrayLiteral(arr) => {
-                arr.iter().for_each(|num| {
-                    let id = self.add_literal(Value::F64(*num));
-                    self.add_load_literal_inst(id);
+                let mut stk_idx: Option<StkIdx> = None; // INFO: temporary stack index
+                arr.iter().for_each(|ex| {
+                    let id = self.compile_expr(ex).unwrap();
+                    if stk_idx.is_none() {
+                        stk_idx = Some(id);
+                    };
                 });
-                StkIdx(self.stack_top().0 - (arr.len() - 1))
+                if let Some(stk_idx) = stk_idx {
+                    stk_idx
+                } else {
+                    if arr.is_empty() {
+                        // INFO: if array is empty, push a 0.0 value temporaryly
+                        let id = self.add_literal(Value::F64(0.));
+                        self.add_load_literal_inst(id);
+                    }
+                    self.stack_top()
+                }
             }
             ExprEnum::Ident(ident) => {
                 let var = self
@@ -630,21 +642,49 @@ impl Compiler {
                 Statement::Expression(ex) => {
                     last_result = Some(self.compile_expr(ex)?);
                 }
-                Statement::VarDef { name, ex, .. } => {
-                    let length = match ex.expr.to_owned() {
+                Statement::VarDef { name, ex, td, .. } => {
+                    let len = match td {
+                        TypeDecl::Array(_, len) => len,
+                        _ => &(1),
+                    };
+                    let assigned_len = match ex.expr.to_owned() {
                         ExprEnum::ArrayLiteral(arr) => arr.len(),
                         _ => 1,
                     };
+
+                    if *len < assigned_len {
+                        panic!("Array length mismatch: expected {len}, got {assigned_len}");
+                    }
+
                     let stk_idx0 = self.compile_expr(ex)?;
+
+                    // TODO: support multi dimentional array
+                    for _ in 0..(*len - assigned_len) {
+                        match td {
+                            TypeDecl::Array(internal_td, _) => match *internal_td.to_owned() {
+                                TypeDecl::F64 => {
+                                    let id = self.add_literal(Value::F64(0.));
+                                    self.add_load_literal_inst(id);
+                                }
+                                TypeDecl::Str => {
+                                    let id = self.add_literal(Value::Str("".to_string()));
+                                    self.add_load_literal_inst(id);
+                                }
+                                _ => panic!("Unsupported type"),
+                            },
+                            _ => panic!("This type should be array, len and assigned_len should be the same"),
+                        }
+                    }
+
                     let mut is_name_assigned = false;
-                    for i in 0..length {
+                    for i in 0..*len {
                         if !matches!(self.target_stack[stk_idx0.0 + i], Target::Temp) {
                             self.add_copy_inst(StkIdx(stk_idx0.0 + i));
-                            if i == 0 {
-                                self.target_stack[stk_idx0.0 + length] =
-                                    Target::Local(name.to_string());
-                                is_name_assigned = true;
-                            }
+                            // if i == 0 {
+                            //     self.target_stack[stk_idx0.0 + assigned_len] =
+                            //         Target::Local(name.to_string());
+                            //     is_name_assigned = true;
+                            // }
                         }
                         if i == 0 && !is_name_assigned {
                             self.target_stack[stk_idx0.0] = Target::Local(name.to_string());

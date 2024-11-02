@@ -1,4 +1,4 @@
-var a: Array = [1, 2, 3, 4, 5];
+var a: Array<f64>[5] = [1, 2, 3, 4];
 var b: f64 = 10;
 var i: f64 = 0;
 
