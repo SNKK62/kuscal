@@ -297,8 +297,8 @@ fn tc_binary_cmp<'src>(
     Ok(match (&lhst, &rhst) {
         (Any, _) => I64,
         (_, Any) => I64,
-        (I64 | F64, F64) => I64,
         (I64, I64) => I64,
+        (I64 | F64, I64 | F64) => I64, // TODO: should be cmp between same types
         (Str, Str) => I64,
         _ => {
             return Err(TypeCheckError::new(
@@ -360,6 +360,21 @@ fn tc_expr<'src>(
         Div(lhs, rhs) => tc_binary_op(lhs, rhs, ctx, "Div")?,
         Gt(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "GT")?,
         Lt(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "LT")?,
+        Eq(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "Eq")?,
+        Neq(lhs, rhs) => tc_binary_cmp(lhs, rhs, ctx, "Neq")?,
+        Not(ex) => {
+            let ty = tc_expr(ex, ctx)?;
+            if ty == TypeDecl::I64 {
+                TypeDecl::I64
+            } else if ty == TypeDecl::F64 {
+                TypeDecl::F64
+            } else {
+                return Err(TypeCheckError::new(
+                    format!("Operation Not between incompatible type: {:?}", ty),
+                    e.span,
+                ));
+            }
+        }
         If(cond, true_branch, false_branch) => {
             tc_coerce_type(&tc_expr(cond, ctx)?, &TypeDecl::I64, cond.span)?;
             let true_type = type_check(true_branch, ctx)?;
@@ -522,6 +537,9 @@ pub enum ExprEnum<'src> {
     Div(Box<Expression<'src>>, Box<Expression<'src>>),
     Gt(Box<Expression<'src>>, Box<Expression<'src>>),
     Lt(Box<Expression<'src>>, Box<Expression<'src>>),
+    Eq(Box<Expression<'src>>, Box<Expression<'src>>),
+    Neq(Box<Expression<'src>>, Box<Expression<'src>>),
+    Not(Box<Expression<'src>>),
     If(
         Box<Expression<'src>>,
         Box<Statements<'src>>,
@@ -637,6 +655,7 @@ fn factor(i: Span) -> IResult<Span, Expression> {
         func_call,
         array_index_access,
         ident,
+        not_factor,
         parens,
     ))(i)
 }
@@ -760,6 +779,12 @@ fn parens(i: Span) -> IResult<Span, Expression> {
     space_delimited(delimited(tag("("), expr, tag(")")))(i)
 }
 
+fn not_factor(i: Span) -> IResult<Span, Expression> {
+    let (i, _) = space_delimited(tag("!"))(i)?;
+    let (i, cond) = cut(factor)(i)?;
+    Ok((i, Expression::new(ExprEnum::Not(Box::new(cond)), i)))
+}
+
 fn num_expr(i: Span) -> IResult<Span, Expression> {
     let (r, init) = term(i)?;
 
@@ -780,14 +805,16 @@ fn num_expr(i: Span) -> IResult<Span, Expression> {
 
 fn cond_expr(i0: Span) -> IResult<Span, Expression> {
     let (i, first) = num_expr(i0)?;
-    let (i, cond) = space_delimited(alt((char('<'), char('>'))))(i)?;
+    let (i, cond) = space_delimited(alt((tag("<"), tag(">"), tag("=="), tag("!="))))(i)?;
     let (i, second) = num_expr(i)?;
     let span = calc_offset(i0, i);
     Ok((
         i,
-        match cond {
-            '<' => Expression::new(ExprEnum::Lt(Box::new(first), Box::new(second)), span),
-            '>' => Expression::new(ExprEnum::Gt(Box::new(first), Box::new(second)), span),
+        match *cond.fragment() {
+            "<" => Expression::new(ExprEnum::Lt(Box::new(first), Box::new(second)), span),
+            ">" => Expression::new(ExprEnum::Gt(Box::new(first), Box::new(second)), span),
+            "==" => Expression::new(ExprEnum::Eq(Box::new(first), Box::new(second)), span),
+            "!=" => Expression::new(ExprEnum::Neq(Box::new(first), Box::new(second)), span),
             _ => unreachable!(),
         },
     ))

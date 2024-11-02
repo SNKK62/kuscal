@@ -32,7 +32,9 @@ pub enum OpCode {
     Jmp,
     /// Jump if false
     Jf,
+    Not,
     Lt,
+    Eq,
     /// Pop n values from the stack where n is given by arg0
     Pop,
     /// Return from function
@@ -73,7 +75,9 @@ impl_op_from!(
     Call,
     Jmp,
     Jf,
+    Not,
     Lt,
+    Eq,
     Pop,
     Ret,
     Yield,
@@ -520,8 +524,25 @@ impl Compiler {
             ExprEnum::Sub(lhs, rhs) => self.bin_op(OpCode::Sub, lhs, rhs)?,
             ExprEnum::Mul(lhs, rhs) => self.bin_op(OpCode::Mul, lhs, rhs)?,
             ExprEnum::Div(lhs, rhs) => self.bin_op(OpCode::Div, lhs, rhs)?,
+            ExprEnum::Not(ex) => {
+                let res = self.compile_expr(ex)?;
+                self.add_copy_inst(res);
+                self.add_inst(OpCode::Not, 0);
+                self.target_stack.pop();
+                self.target_stack.push(Target::Temp);
+                self.stack_top()
+            }
             ExprEnum::Gt(lhs, rhs) => self.bin_op(OpCode::Lt, rhs, lhs)?,
             ExprEnum::Lt(lhs, rhs) => self.bin_op(OpCode::Lt, lhs, rhs)?,
+            ExprEnum::Eq(lhs, rhs) => self.bin_op(OpCode::Eq, lhs, rhs)?,
+            ExprEnum::Neq(lhs, rhs) => {
+                let stk = self.bin_op(OpCode::Eq, lhs, rhs)?;
+                self.add_copy_inst(stk);
+                self.add_inst(OpCode::Not, 0);
+                self.target_stack.pop();
+                self.target_stack.push(Target::Temp);
+                self.stack_top()
+            }
             ExprEnum::FnInvoke(name, args) => {
                 let stack_before_args = self.target_stack.len();
                 let name = self.add_literal(Value::Str(name.to_string()));
@@ -1188,10 +1209,21 @@ impl Vm {
                         continue;
                     }
                 }
+                OpCode::Not => {
+                    let stack = &mut self.top_mut()?.stack;
+                    let top = stack.last().unwrap().clone();
+                    stack.pop();
+                    stack.push(Value::F64(if top.coerce_f64() == 0. { 1. } else { 0. }));
+                }
                 OpCode::Lt => Self::interpret_bin_op(
                     &mut self.top_mut()?.stack,
                     |lhs, rhs| (lhs < rhs) as i32 as f64,
                     |lhs, rhs| (lhs < rhs) as i64,
+                ),
+                OpCode::Eq => Self::interpret_bin_op(
+                    &mut self.top_mut()?.stack,
+                    |lhs, rhs| (lhs == rhs) as i32 as f64,
+                    |lhs, rhs| (lhs == rhs) as i64,
                 ),
                 OpCode::Pop => {
                     let stack = &mut self.top_mut()?.stack;
