@@ -513,7 +513,6 @@ impl Compiler {
 
                 if let Some(var) = var {
                     let index_ex_idx = self.compile_expr(index)?;
-                    println!("stack: {:?}", self.target_stack);
                     self.add_copy_inst(index_ex_idx);
                     self.add_index_copy_inst(StkIdx(var.0));
                     self.stack_top()
