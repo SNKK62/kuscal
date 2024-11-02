@@ -18,7 +18,7 @@ pub type Functions<'src> = HashMap<String, FnDecl<'src>>;
 
 fn unary_fn<'a>(f: fn(f64) -> f64) -> FnDecl<'a> {
     FnDecl::Native(NativeFn {
-        args: vec![("lhs", TypeDecl::F64), ("rhs", TypeDecl::F64)],
+        args: vec![("arg", TypeDecl::F64)],
         ret_type: TypeDecl::F64,
         code: Box::new(move |args| {
             Value::F64(f(args
