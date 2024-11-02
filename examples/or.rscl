@@ -1,0 +1,13 @@
+var a: f64 = 10;
+
+if a || (a == 20) {
+    print("Success!");
+};
+
+if (a == 20) || a {
+    print("Success!");
+};
+
+if !((a == 20) || (a == 30)) {
+    print("Success!");
+};
