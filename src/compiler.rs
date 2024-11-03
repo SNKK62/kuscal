@@ -129,7 +129,7 @@ enum Target {
     Temp,
     // Literal(usize),
     Literal,
-    Local(String),
+    Local(String, Option<TypeDecl>),
 }
 
 struct LoopFrame {
@@ -501,7 +501,7 @@ impl Compiler {
                     .enumerate()
                     .rev()
                     .find(|(_i, tgt)| {
-                        if let Target::Local(id) = tgt {
+                        if let Target::Local(id, _) = tgt {
                             id == ident.fragment()
                         } else {
                             false
@@ -513,10 +513,10 @@ impl Compiler {
                     return Err(format!("Variable not found: {ident:?}").into());
                 }
             }
-            ExprEnum::ArrayIndexAccess(ident, index) => {
+            ExprEnum::ArrayIndexAccess(ident, indices) => {
                 let target_stack = &self.target_stack.clone();
                 let var = target_stack.iter().enumerate().rev().find(|(_i, tgt)| {
-                    if let Target::Local(id) = tgt {
+                    if let Target::Local(id, _) = tgt {
                         id == ident.fragment()
                     } else {
                         false
@@ -524,9 +524,50 @@ impl Compiler {
                 });
 
                 if let Some(var) = var {
-                    let index_ex_idx = self.compile_expr(index)?;
-                    self.add_copy_inst(index_ex_idx);
-                    self.add_index_copy_inst(StkIdx(var.0));
+                    let (idx, target) = var;
+                    let mut ty = match target {
+                        Target::Local(_, ty) => ty.as_ref().unwrap(),
+                        _ => {
+                            return Err(format!("Variable not found: {ident:?}").into());
+                        }
+                    };
+                    let mut i = 0;
+                    let mut stk_idxs: Vec<(StkIdx, usize)> = vec![]; // (stack_index, len)
+                    loop {
+                        match ty {
+                            TypeDecl::Array(internal_ty, len) => {
+                                let index_ex_idx = self.compile_expr(&indices[i])?;
+                                stk_idxs.push((index_ex_idx, *len));
+                                i += 1;
+                                ty = internal_ty;
+                                continue;
+                            }
+                            TypeDecl::F64 | TypeDecl::Str => {}
+                            _ => {
+                                return Err(("This type isn't supported.").into());
+                            }
+                        };
+                        break;
+                    }
+
+                    let index_idx = self.add_literal(Value::F64(0.)); // temp sum
+                    self.add_load_literal_inst(index_idx);
+                    let (last_stk_idx, _) = stk_idxs.pop().unwrap();
+                    for (stk_idx, len) in stk_idxs.iter() {
+                        self.add_copy_inst(*stk_idx);
+                        let idx = self.add_literal(Value::F64(*len as f64));
+                        self.add_load_literal_inst(idx);
+                        self.add_inst(OpCode::Mul, 0);
+                        self.target_stack.pop(); // for mul
+
+                        self.add_inst(OpCode::Add, 0);
+                        self.target_stack.pop(); // for add
+                    }
+                    self.add_copy_inst(last_stk_idx);
+                    self.add_inst(OpCode::Add, 0);
+                    self.target_stack.pop(); // for add
+
+                    self.add_index_copy_inst(StkIdx(idx));
                     self.stack_top()
                 } else {
                     return Err(format!("Variable not found: {ident:?}").into());
@@ -635,33 +676,40 @@ impl Compiler {
         }
     }
 
-    fn compile_stmts(&mut self, stmts: &Statements) -> Result<Option<StkIdx>, Box<dyn Error>> {
-        let mut last_result = None;
-        for stmt in stmts {
-            match stmt {
-                Statement::Expression(ex) => {
-                    last_result = Some(self.compile_expr(ex)?);
-                }
-                Statement::VarDef { name, ex, td, .. } => {
-                    let len = match td {
-                        TypeDecl::Array(_, len) => len,
-                        _ => &(1),
-                    };
-                    let assigned_len = match ex.expr.to_owned() {
-                        ExprEnum::ArrayLiteral(arr) => arr.len(),
-                        _ => 1,
-                    };
-
-                    if *len < assigned_len {
-                        panic!("Array length mismatch: expected {len}, got {assigned_len}");
+    fn resolve_array(&mut self, ty: &TypeDecl, ex: &Expression, stk_idx0: &mut Option<StkIdx>) {
+        println!("ty: {ty:?}, ex: {ex:?}, stk_idx0: {stk_idx0:?}");
+        match ty {
+            TypeDecl::Array(ty, len) => match *ty.to_owned() {
+                TypeDecl::Array(_, _) => match ex.expr.to_owned() {
+                    ExprEnum::ArrayLiteral(ex) => {
+                        // TODO: complete the arrays if the assigned length is less than the defined length
+                        if ex.len() != *len {
+                            panic!("Array length mismatch: expected {len}, got {}", ex.len());
+                        }
+                        for e in ex {
+                            self.resolve_array(ty, &e, stk_idx0);
+                        }
                     }
-
-                    let stk_idx0 = self.compile_expr(ex)?;
-
-                    // TODO: support multi dimentional array
-                    for _ in 0..(*len - assigned_len) {
-                        match td {
-                            TypeDecl::Array(internal_td, _) => match *internal_td.to_owned() {
+                    _ => {
+                        panic!("expression should be array literal");
+                    }
+                },
+                _ => match &ex.expr {
+                    ExprEnum::ArrayLiteral(ex) => {
+                        let assigned_len = ex.len();
+                        if *len < assigned_len {
+                            panic!("Array length mismatch: expected {len}, got {assigned_len}");
+                        }
+                        for e in ex {
+                            let stk_idx = self.compile_expr(e);
+                            if let Ok(stk_idx) = stk_idx {
+                                if stk_idx0.is_none() {
+                                    *stk_idx0 = Some(stk_idx);
+                                }
+                            }
+                        }
+                        for _ in 0..(*len - assigned_len) {
+                            match *ty.to_owned() {
                                 TypeDecl::F64 => {
                                     let id = self.add_literal(Value::F64(0.));
                                     self.add_load_literal_inst(id);
@@ -671,27 +719,58 @@ impl Compiler {
                                     self.add_load_literal_inst(id);
                                 }
                                 _ => panic!("Unsupported type"),
-                            },
-                            _ => panic!("This type should be array, len and assigned_len should be the same"),
+                            }
                         }
                     }
+                    _ => {
+                        panic!("expression should be array literal");
+                    }
+                },
+            },
+            _ => panic!("This type should be array"),
+        }
+    }
 
-                    let mut is_name_assigned = false;
-                    for i in 0..*len {
-                        if !matches!(self.target_stack[stk_idx0.0 + i], Target::Temp) {
-                            self.add_copy_inst(StkIdx(stk_idx0.0 + i));
-                            // if i == 0 {
-                            //     self.target_stack[stk_idx0.0 + assigned_len] =
-                            //         Target::Local(name.to_string());
-                            //     is_name_assigned = true;
-                            // }
+    fn compile_stmts(&mut self, stmts: &Statements) -> Result<Option<StkIdx>, Box<dyn Error>> {
+        let mut last_result = None;
+        for stmt in stmts {
+            match stmt {
+                Statement::Expression(ex) => {
+                    last_result = Some(self.compile_expr(ex)?);
+                }
+                Statement::VarDef { name, ex, td, .. } => match td {
+                    TypeDecl::Array(_, _) => {
+                        let mut stk_idx = None;
+                        self.resolve_array(td, ex, &mut stk_idx);
+
+                        let mut tmp_ty = td;
+                        let mut sum_len = 1;
+                        while let TypeDecl::Array(ty, len) = tmp_ty {
+                            sum_len *= len;
+                            tmp_ty = ty.as_ref();
                         }
-                        if i == 0 && !is_name_assigned {
-                            self.target_stack[stk_idx0.0] = Target::Local(name.to_string());
-                            is_name_assigned = true;
+
+                        for i in 0..sum_len {
+                            self.add_copy_inst(StkIdx(stk_idx.unwrap().0 + i));
+                        }
+
+                        if let Some(stk_idx) = stk_idx {
+                            self.target_stack[stk_idx.0 + sum_len] =
+                                Target::Local(name.to_string(), Some(td.clone()));
+                        } else {
+                            panic!("Array index not found");
                         }
                     }
-                }
+                    _ => {
+                        let mut stk_idx = self.compile_expr(ex)?;
+                        if !matches!(self.target_stack[stk_idx.0], Target::Temp) {
+                            self.add_copy_inst(stk_idx);
+                            stk_idx = self.stack_top();
+                        }
+                        self.target_stack[stk_idx.0] =
+                            Target::Local(name.to_string(), Some(td.clone()));
+                    }
+                },
                 Statement::VarAssign { name, ex, .. } => {
                     let stk_ex = self.compile_expr(ex)?;
                     let (stk_local, _) = self
@@ -700,7 +779,7 @@ impl Compiler {
                         .enumerate()
                         .rev()
                         .find(|(_, tgt)| {
-                            if let Target::Local(tgt) = tgt {
+                            if let Target::Local(tgt, _) = tgt {
                                 tgt == name.fragment()
                             } else {
                                 false
@@ -711,23 +790,69 @@ impl Compiler {
                     self.add_store_inst(StkIdx(stk_local));
                 }
                 Statement::ArrayIndexAssign {
-                    name, index, ex, ..
+                    name, indices, ex, ..
                 } => {
-                    let index_stk_idx = self.compile_expr(index)?;
                     let stk_ex = self.compile_expr(ex)?;
-                    let (stk_local, _) = self
-                        .target_stack
+                    let mut target_stack = self.target_stack.clone();
+                    let opt = target_stack
                         .iter_mut()
                         .enumerate()
                         .rev()
                         .find(|(_, tgt)| {
-                            if let Target::Local(tgt) = tgt {
+                            if let Target::Local(tgt, _) = tgt {
                                 tgt == name.fragment()
                             } else {
                                 false
                             }
                         })
                         .ok_or_else(|| format!("Variable name not found: {name}"))?;
+                    let (stk_local, target) = opt;
+
+                    let mut ty = match target {
+                        Target::Local(_, ty) => ty.as_ref().unwrap(),
+                        _ => {
+                            return Err(("target should be Target::Local").into());
+                        }
+                    };
+                    let mut i = 0;
+                    let mut stk_idxs: Vec<(StkIdx, usize)> = vec![]; // (stack_index, len)
+                    loop {
+                        match ty {
+                            TypeDecl::Array(internal_ty, len) => {
+                                let ex = &indices[i];
+                                let index_ex_idx = self.compile_expr(ex)?;
+                                stk_idxs.push((index_ex_idx, *len));
+                                i += 1;
+                                ty = internal_ty;
+                                continue;
+                            }
+                            TypeDecl::F64 | TypeDecl::Str => {}
+                            _ => {
+                                return Err(("This type isn't supported.").into());
+                            }
+                        };
+                        break;
+                    }
+
+                    let index_idx = self.add_literal(Value::F64(0.)); // temp sum
+                    self.add_load_literal_inst(index_idx);
+                    let (last_stk_idx, _) = stk_idxs.pop().unwrap();
+                    for (stk_idx, len) in stk_idxs.iter() {
+                        self.add_copy_inst(*stk_idx);
+                        let idx = self.add_literal(Value::F64(*len as f64));
+                        self.add_load_literal_inst(idx);
+                        self.add_inst(OpCode::Mul, 0);
+                        self.target_stack.pop(); // for mul
+
+                        self.add_inst(OpCode::Add, 0);
+                        self.target_stack.pop(); // for add
+                    }
+                    self.add_copy_inst(last_stk_idx);
+                    self.add_inst(OpCode::Add, 0);
+                    self.target_stack.pop(); // for add
+
+                    let index_stk_idx = self.stack_top();
+
                     self.add_copy_inst(stk_ex);
                     self.add_copy_inst(index_stk_idx);
                     self.add_index_store_inst(StkIdx(stk_local));
@@ -744,7 +869,8 @@ impl Compiler {
                     dprintln!("start: {stk_start:?} end: {stk_end:?}");
                     self.add_copy_inst(stk_start);
                     let stk_loop_var = self.stack_top();
-                    self.target_stack[stk_loop_var.0] = Target::Local(loop_var.to_string());
+                    self.target_stack[stk_loop_var.0] =
+                        Target::Local(loop_var.to_string(), Some(TypeDecl::I64));
                     dprintln!("after start: {:?}", self.target_stack);
                     let inst_check_exit = self.instructions.len();
                     self.add_copy_inst(stk_loop_var);
@@ -827,7 +953,10 @@ impl Compiler {
                     let target_stack = std::mem::take(&mut self.target_stack);
                     self.target_stack = args
                         .iter()
-                        .map(|arg| Target::Local(arg.0.to_string()))
+                        .map(|arg| {
+                            let ty = (arg.1).clone();
+                            Target::Local(arg.0.to_string(), Some(ty))
+                        })
                         .collect();
                     self.compile_stmts(stmts)?;
                     self.add_fn(name.to_string(), args, *cofn);

@@ -4,7 +4,7 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, none_of},
     combinator::{cut, map_res, opt, recognize},
     error::ParseError,
-    multi::{fold_many0, many0, separated_list0},
+    multi::{fold_many0, many0, many1, separated_list0},
     number::complete::recognize_float,
     sequence::{delimited, pair, preceded, terminated},
     Finish, IResult, InputTake, Offset, Parser,
@@ -320,32 +320,31 @@ fn tc_expr<'src>(
     Ok(match &e.expr {
         NumLiteral(_val) => TypeDecl::F64,
         StrLiteral(_val) => TypeDecl::Str,
-        // TODO: fix array type
+        // TODO: fix temporary array type
         ArrayLiteral(_val) => TypeDecl::Array(Box::new(TypeDecl::Any), 0),
-        ArrayIndexAccess(name, index, ..) => {
+        ArrayIndexAccess(name, indices, ..) => {
             let var = ctx.get_var(name).ok_or_else(|| {
                 TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
             })?;
             // TODO: index should be i64
-            match var {
-                TypeDecl::Array(ty, _) => {
-                    if tc_expr(index, ctx)? != TypeDecl::F64
-                        && tc_expr(index, ctx)? != TypeDecl::I64
-                    {
-                        return Err(TypeCheckError::new(
-                            "index should be f64 or i64".to_string(),
-                            e.span,
-                        ));
-                    }
-                    *ty
-                }
-                _ => {
+            for index in indices.iter() {
+                if tc_expr(index, ctx)? != TypeDecl::F64 && tc_expr(index, ctx)? != TypeDecl::I64 {
                     return Err(TypeCheckError::new(
-                        format!("Variable \"{}\" is not an array", name),
+                        "index should be f64 or i64".to_string(),
                         e.span,
-                    ))
-                }
+                    ));
+                };
             }
+            let mut var_ty = var;
+            loop {
+                match var_ty {
+                    TypeDecl::Array(ty, _) => {
+                        var_ty = *ty;
+                    }
+                    _ => break,
+                };
+            }
+            var_ty
         }
         Ident(name) => ctx.get_var(name).ok_or_else(|| {
             TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)
@@ -431,16 +430,16 @@ pub fn type_check<'src>(
             Statement::ArrayIndexAssign { name, ex, .. } => {
                 let init_type = tc_expr(ex, ctx)?;
                 let arr = ctx.vars.get(**name).expect("Variable not found");
-                let ty = match arr {
-                    TypeDecl::Array(ty, _) => ty,
-                    _ => {
-                        return Err(TypeCheckError::new(
-                            format!("Variable \"{}\" is not an array", name),
-                            ex.span,
-                        ))
-                    }
-                };
-                tc_coerce_type(&init_type, ty, ex.span)?; // TODO: fix array type
+                let mut var_ty = arr;
+                loop {
+                    match var_ty {
+                        TypeDecl::Array(ty, _) => {
+                            var_ty = ty;
+                        }
+                        _ => break,
+                    };
+                }
+                tc_coerce_type(&init_type, var_ty, ex.span)?; // TODO: fix array type
             }
             Statement::FnDef {
                 name,
@@ -548,8 +547,8 @@ pub enum ExprEnum<'src> {
     Ident(Span<'src>),
     NumLiteral(f64),
     StrLiteral(String),
-    ArrayLiteral(Vec<Expression<'src>>), // INFO: only 1d array is supported
-    ArrayIndexAccess(Span<'src>, Box<Expression<'src>>),
+    ArrayLiteral(Vec<Expression<'src>>),
+    ArrayIndexAccess(Span<'src>, Vec<Expression<'src>>),
     FnInvoke(Span<'src>, Vec<Expression<'src>>),
     Add(Box<Expression<'src>>, Box<Expression<'src>>),
     Sub(Box<Expression<'src>>, Box<Expression<'src>>),
@@ -599,7 +598,7 @@ pub enum Statement<'src> {
     ArrayIndexAssign {
         span: Span<'src>,
         name: Span<'src>,
-        index: Expression<'src>,
+        indices: Vec<Expression<'src>>,
         ex: Expression<'src>,
     },
     For {
@@ -786,14 +785,19 @@ fn array_literal(input: Span) -> IResult<Span, Expression> {
 
 fn array_index_access(i: Span) -> IResult<Span, Expression> {
     let (r, name) = space_delimited(identifier)(i)?;
-    let (r, _) = space_delimited(char('['))(r)?;
     // TODO: to be nom::combinator::cut
-    let (r, index) = space_delimited(expr)(r)?;
-    let (r, _) = space_delimited(char(']'))(r)?;
+    let (r, indices) = many1(|i| {
+        let (i, _) = space_delimited(char('['))(i)?;
+        let (i, index) = space_delimited(expr)(i)?;
+        let (i, _) = space_delimited(char(']'))(i)?;
+        Ok((i, index))
+    })(r)?;
+    // refine above loop to be nom::multi::many0
+
     Ok((
         r,
         Expression::new(
-            ExprEnum::ArrayIndexAccess(name, Box::new(index)), // TODO: fix index
+            ExprEnum::ArrayIndexAccess(name, indices), // TODO: fix index
             i,
         ),
     ))
@@ -945,10 +949,13 @@ fn var_assign(i: Span) -> IResult<Span, Statement> {
 fn array_index_assign(i: Span) -> IResult<Span, Statement> {
     let span = i;
     let (i, name) = space_delimited(identifier)(i)?;
-    let (i, _) = space_delimited(char('['))(i)?;
     // TODO: to be nom::combinator::cut
-    let (i, index) = space_delimited(expr)(i)?;
-    let (i, _) = space_delimited(char(']'))(i)?;
+    let (i, indices) = many1(|i| {
+        let (i, _) = space_delimited(char('['))(i)?;
+        let (i, index) = space_delimited(expr)(i)?;
+        let (i, _) = space_delimited(char(']'))(i)?;
+        Ok((i, index))
+    })(i)?;
     let (i, _) = space_delimited(char('='))(i)?;
     let (i, ex) = space_delimited(expr)(i)?;
     let (i, _) = space_delimited(char(';'))(i)?;
@@ -957,7 +964,7 @@ fn array_index_assign(i: Span) -> IResult<Span, Statement> {
         Statement::ArrayIndexAssign {
             span: calc_offset(span, i),
             name,
-            index,
+            indices,
             ex,
         },
     ))
