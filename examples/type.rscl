@@ -2,13 +2,13 @@ var i: i64 = i64(123);
 var f: f64 = f64(123.456);
 var s: str = "Hello, world!";
 
-print(i);
+println(i);
 dbg(i);
-print(f);
+println(f);
 dbg(f);
-print(s);
+println(s);
 dbg(s);
 
-print(i + f);
-print(i / f);
-print(s + s);
+println(i + f);
+println(i / f);
+println(s + s);

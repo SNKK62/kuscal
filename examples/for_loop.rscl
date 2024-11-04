@@ -4,4 +4,4 @@ for i in 0 to 3 {
     a = a + 1;
 }
 
-print(a);
+println(a);

@@ -6,4 +6,4 @@ fn fibonacci(n: f64) -> f64 {
     return n * fibonacci(n - 1);
 }
 
-print(fibonacci(5));
+println(fibonacci(5));

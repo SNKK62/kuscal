@@ -8,6 +8,7 @@ while i < 5 {
     a[i] = pow(b, 2);
     i = i + 1;
 }
+println("");
 
 i = 0;
 
@@ -15,6 +16,7 @@ while i < 5 {
     print(a[i]);
     i = i + 1;
 }
+println("");
 
 for j in 0 to 5 {
     if j < 2 {
@@ -23,6 +25,6 @@ for j in 0 to 5 {
         if j > 2 {
             break;
         };
-        print(a[j]);
+        println(a[j]);
     }
 }

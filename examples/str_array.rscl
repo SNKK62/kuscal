@@ -1,11 +1,11 @@
 var a: Array<str>[3] = ["Hello", "World"];
 
 for i in 0 to 3 {
-    print(a[i]);
+    println(a[i]);
 }
 
 a[2] = "!"; 
 
 for i in 0 to 3 {
-    print(a[i]);
+    println(a[i]);
 }

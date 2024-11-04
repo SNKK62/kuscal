@@ -1,25 +1,25 @@
 
-print(!1);
-print(!0);
+println(!1);
+println(!0);
 
-print(!!0);
+println(!!0);
 
 var a: f64 = 1;
 var b: f64 = 2;
 
 if !(a > b) {
-    print("Success!");
+    println("Success!");
 };
 
 if !(a == b) {
-    print("Success!");
+    println("Success!");
 };
 
 if !(a < b) == 0 {
-    print("Success!");
+    println("Success!");
 };
 
 if !1 == 0 {
-    print("Success!");
+    println("Success!");
 };
 

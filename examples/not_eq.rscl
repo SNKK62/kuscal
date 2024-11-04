@@ -1,6 +1,6 @@
 var a: f64 = 1;
 if a != 2 {
-    print("Not Equal!");
+    println("Not Equal!");
 } else {
-    print("Equal!");
+    println("Equal!");
 }

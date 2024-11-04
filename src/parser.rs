@@ -47,6 +47,13 @@ fn print_fn(args: &[Value]) -> Value {
     for arg in args {
         print!("{} ", arg);
     }
+    Value::F64(0.)
+}
+
+fn println_fn(args: &[Value]) -> Value {
+    for arg in args {
+        print!("{} ", arg);
+    }
     println!();
     Value::F64(0.)
 }
@@ -83,6 +90,14 @@ pub fn standard_functions<'src>() -> Functions<'src> {
             args: vec![("arg", TypeDecl::Any)],
             ret_type: TypeDecl::Any,
             code: Box::new(print_fn),
+        }),
+    );
+    funcs.insert(
+        "println".to_string(),
+        FnDecl::Native(NativeFn {
+            args: vec![("arg", TypeDecl::Any)],
+            ret_type: TypeDecl::Any,
+            code: Box::new(println_fn),
         }),
     );
     funcs.insert(
@@ -336,13 +351,8 @@ fn tc_expr<'src>(
                 };
             }
             let mut var_ty = var;
-            loop {
-                match var_ty {
-                    TypeDecl::Array(ty, _) => {
-                        var_ty = *ty;
-                    }
-                    _ => break,
-                };
+            while let TypeDecl::Array(ty, _) = var_ty {
+                var_ty = *ty;
             }
             var_ty
         }
@@ -431,13 +441,8 @@ pub fn type_check<'src>(
                 let init_type = tc_expr(ex, ctx)?;
                 let arr = ctx.vars.get(**name).expect("Variable not found");
                 let mut var_ty = arr;
-                loop {
-                    match var_ty {
-                        TypeDecl::Array(ty, _) => {
-                            var_ty = ty;
-                        }
-                        _ => break,
-                    };
+                while let TypeDecl::Array(ty, _) = var_ty {
+                    var_ty = ty;
                 }
                 tc_coerce_type(&init_type, var_ty, ex.span)?; // TODO: fix array type
             }

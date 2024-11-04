@@ -6,5 +6,5 @@ for i in 0 to 3 {
     a = a + i;
 }
 if 0 < a {
-    print(a);
+    println(a);
 };

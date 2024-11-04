@@ -1,1 +1,1 @@
-print(sin(1.55));
+println(sin(1.55));

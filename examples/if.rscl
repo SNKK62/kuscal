@@ -1,4 +1,4 @@
 var one: f64 = 1;
 var a: f64 = if one > 2 { 1 } else { 2 };
 
-print(a + 10);
+println(a + 10);

@@ -1,11 +1,11 @@
 var a: f64 = 0;
-print(a);
+println(a);
 
 a = 2;
-print(a);
+println(a);
 
 var a: f64 = 1;
-print(a);
+println(a);
 
 a = 4;
-print(a);
+println(a);

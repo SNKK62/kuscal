@@ -1,9 +1,9 @@
 var a: f64 = 10;
 
 if a && (a == 10) {
-    print("Success!");
+    println("Success!");
 };
 
 if !((a == 20) && (a == 10)) {
-    print("Success!");
+    println("Success!");
 };
