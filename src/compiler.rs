@@ -729,6 +729,9 @@ impl Compiler {
                                 }
                                 _ => panic!("Unsupported type"),
                             }
+                            if stk_idx0.is_none() {
+                                *stk_idx0 = Some(self.stack_top());
+                            }
                         }
                     }
                     _ => {
