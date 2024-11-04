@@ -1,6 +1,6 @@
 var a: f64 = 0;
 for i in 0 to 3 {
-    if i < 1 {
+    if i < 2 {
         continue;
     };
     a = a + i;

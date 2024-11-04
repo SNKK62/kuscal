@@ -532,12 +532,14 @@ impl Compiler {
                         }
                     };
                     let mut i = 0;
-                    let mut stk_idxs: Vec<(StkIdx, usize)> = vec![]; // (stack_index, len)
+                    let mut stk_idxs: Vec<StkIdx> = vec![]; // stack_index
+                    let mut array_lengths: Vec<usize> = vec![]; // len
                     loop {
                         match ty {
                             TypeDecl::Array(internal_ty, len) => {
                                 let index_ex_idx = self.compile_expr(&indices[i])?;
-                                stk_idxs.push((index_ex_idx, *len));
+                                stk_idxs.push(index_ex_idx);
+                                array_lengths.push(*len);
                                 i += 1;
                                 ty = internal_ty;
                                 continue;
@@ -550,12 +552,20 @@ impl Compiler {
                         break;
                     }
 
+                    let mut cumulative_lengths = vec![1];
+                    for len in array_lengths.iter().rev() {
+                        cumulative_lengths.push(cumulative_lengths.last().unwrap() * len);
+                    }
+                    cumulative_lengths.pop();
+                    cumulative_lengths.reverse();
+                    cumulative_lengths.pop();
+
                     let index_idx = self.add_literal(Value::F64(0.)); // temp sum
                     self.add_load_literal_inst(index_idx);
-                    let (last_stk_idx, _) = stk_idxs.pop().unwrap();
-                    for (stk_idx, len) in stk_idxs.iter() {
+                    let last_stk_idx = stk_idxs.pop().unwrap();
+                    for (i, stk_idx) in stk_idxs.iter().enumerate() {
                         self.add_copy_inst(*stk_idx);
-                        let idx = self.add_literal(Value::F64(*len as f64));
+                        let idx = self.add_literal(Value::F64(cumulative_lengths[i] as f64));
                         self.add_load_literal_inst(idx);
                         self.add_inst(OpCode::Mul, 0);
                         self.target_stack.pop(); // for mul
@@ -677,7 +687,6 @@ impl Compiler {
     }
 
     fn resolve_array(&mut self, ty: &TypeDecl, ex: &Expression, stk_idx0: &mut Option<StkIdx>) {
-        println!("ty: {ty:?}, ex: {ex:?}, stk_idx0: {stk_idx0:?}");
         match ty {
             TypeDecl::Array(ty, len) => match *ty.to_owned() {
                 TypeDecl::Array(_, _) => match ex.expr.to_owned() {
@@ -815,13 +824,15 @@ impl Compiler {
                         }
                     };
                     let mut i = 0;
-                    let mut stk_idxs: Vec<(StkIdx, usize)> = vec![]; // (stack_index, len)
+                    let mut stk_idxs: Vec<StkIdx> = vec![]; // stack_index
+                    let mut array_lengths: Vec<usize> = vec![]; // len
                     loop {
                         match ty {
                             TypeDecl::Array(internal_ty, len) => {
                                 let ex = &indices[i];
                                 let index_ex_idx = self.compile_expr(ex)?;
-                                stk_idxs.push((index_ex_idx, *len));
+                                stk_idxs.push(index_ex_idx);
+                                array_lengths.push(*len);
                                 i += 1;
                                 ty = internal_ty;
                                 continue;
@@ -834,12 +845,20 @@ impl Compiler {
                         break;
                     }
 
+                    let mut cumulative_lengths = vec![1];
+                    for len in array_lengths.iter().rev() {
+                        cumulative_lengths.push(cumulative_lengths.last().unwrap() * len);
+                    }
+                    cumulative_lengths.pop();
+                    cumulative_lengths.reverse();
+                    cumulative_lengths.pop();
+
                     let index_idx = self.add_literal(Value::F64(0.)); // temp sum
                     self.add_load_literal_inst(index_idx);
-                    let (last_stk_idx, _) = stk_idxs.pop().unwrap();
-                    for (stk_idx, len) in stk_idxs.iter() {
+                    let last_stk_idx = stk_idxs.pop().unwrap();
+                    for (i, stk_idx) in stk_idxs.iter().enumerate() {
                         self.add_copy_inst(*stk_idx);
-                        let idx = self.add_literal(Value::F64(*len as f64));
+                        let idx = self.add_literal(Value::F64(cumulative_lengths[i] as f64));
                         self.add_load_literal_inst(idx);
                         self.add_inst(OpCode::Mul, 0);
                         self.target_stack.pop(); // for mul

@@ -1,14 +1,7 @@
 var a: Array<Array<f64>[5]>[2] = [[1, 2, 3, 4], [5, 6, 7, 8, 9]];
 
-for i in 0 to 5 {
-    for j in 0 to 2 {
-        print(a[i][j]);
-        a[i][j] = a[i][j] * 2;
-    }
-}
-
-for i in 0 to 5 {
-    for j in 0 to 2 {
+for i in 0 to 2 {
+    for j in 0 to 5 {
         print(a[i][j]);
     }
 }
