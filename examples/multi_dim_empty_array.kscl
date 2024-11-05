@@ -7,7 +7,7 @@ arr[4][4] = 4;
 
 for i in 0 to 8 {
     for j in 0 to 8 {
-        print(arr[i][j]);
+        print(arr[i][j], " ");
     }
     println("");
 }

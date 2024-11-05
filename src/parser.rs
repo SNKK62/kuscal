@@ -45,14 +45,14 @@ fn binary_fn<'a>(f: fn(f64, f64) -> f64) -> FnDecl<'a> {
 
 fn print_fn(args: &[Value]) -> Value {
     for arg in args {
-        print!("{} ", arg);
+        print!("{}", arg);
     }
     Value::F64(0.)
 }
 
 fn println_fn(args: &[Value]) -> Value {
     for arg in args {
-        print!("{} ", arg);
+        print!("{}", arg);
     }
     println!();
     Value::F64(0.)
