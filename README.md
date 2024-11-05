@@ -51,7 +51,7 @@ Basic comparison operators are available. (`<`, `>`, `==`, `!=`).<br>
 Array is available. You can access elements by index.<br>
 Multi-dimensional array is also available!
 
-### source
+#### source
 ```
 var arr: Array<Array<f64>[8]>[8] = [];
 
@@ -68,7 +68,7 @@ for i in 0 to 8 {
 }
 ```
 
-### output
+#### output
 ```
 0 0 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
@@ -78,6 +78,26 @@ for i in 0 to 8 {
 0 0 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
+```
+
+## Comment
+You can write comments by `//`.<br>
+This syntax makes the rest of the line a comment.
+
+#### source
+```
+// This is a comment
+
+var a: f64 = 10;
+println(a); // This is a comment
+a = 20; // This is a comment
+println(a);
+```
+
+#### output
+```
+10
+20
 ```
 
 ## Type

@@ -1,0 +1,6 @@
+// This is a comment
+
+var a: f64 = 10;
+println(a); // This is a comment
+a = 20; // This is a comment
+println(a);

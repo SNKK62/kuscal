@@ -1,6 +1,6 @@
 use nom::{
     branch::alt,
-    bytes::complete::tag,
+    bytes::complete::{tag, take_until},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, none_of},
     combinator::{cut, map_res, opt, recognize},
     error::ParseError,
@@ -1148,6 +1148,15 @@ fn yield_statement(i: Span) -> IResult<Span, Statement> {
     Ok((i, Statement::Yield(ex)))
 }
 
+fn comment_statement(i: Span) -> IResult<Span, Statement> {
+    let (i, _) = space_delimited(tag("//"))(i)?;
+    let (i, _) = take_until("\n")(i)?;
+    Ok((
+        i,
+        Statement::Expression(Expression::new(ExprEnum::NumLiteral(0.0), i)),
+    ))
+}
+
 fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, Statement> {
     let terminator = move |i| -> IResult<Span, ()> {
         let mut semicolon = pair(tag(";"), multispace0);
@@ -1159,6 +1168,7 @@ fn general_statement<'a>(last: bool) -> impl Fn(Span<'a>) -> IResult<Span<'a>, S
     };
     move |input| {
         alt((
+            comment_statement,
             var_def,
             var_assign,
             array_index_assign,
