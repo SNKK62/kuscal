@@ -1,0 +1,13 @@
+var arr: Array<Array<f64>[8]>[8] = [];
+
+arr[3][3] = 1;
+arr[3][4] = 2;
+arr[4][3] = 3;
+arr[4][4] = 4;
+
+for i in 0 to 8 {
+    for j in 0 to 8 {
+        print(arr[i][j]);
+    }
+    println("");
+}

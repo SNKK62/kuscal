@@ -95,26 +95,37 @@ impl_op_from!(
 #[repr(C)]
 pub struct Instruction {
     op: OpCode,
-    arg0: u8,
+    // NOTE: upgrade to u16 since we have more than 256 instructions
+    arg0: u16,
     // NOTE: for while statement, arg1 is for the stack adustment.
     // in most opcodes, arg1 is not used.
-    arg1: u8,
+    arg1: u16,
 }
 
 impl Instruction {
-    pub fn new(op: OpCode, arg0: u8, arg1: u8) -> Self {
+    pub fn new(op: OpCode, arg0: u16, arg1: u16) -> Self {
         Self { op, arg0, arg1 }
     }
 
     pub fn serialize(&self, writer: &mut impl Write) -> Result<(), std::io::Error> {
-        writer.write_all(&[self.op as u8, self.arg0, self.arg1])?;
+        writer.write_all(&[self.op as u8])?;
+        writer.write_all(&(self.arg0).to_le_bytes())?;
+        writer.write_all(&(self.arg1).to_le_bytes())?;
         Ok(())
     }
 
     pub fn deserialize(reader: &mut impl Read) -> Result<Self, std::io::Error> {
-        let mut buf = [0u8; 3];
+        let mut buf = [0u8; 1];
         reader.read_exact(&mut buf)?;
-        Ok(Self::new(buf[0].into(), buf[1], buf[2]))
+        let mut arg0_buf = [0u8; std::mem::size_of::<u16>()];
+        reader.read_exact(&mut arg0_buf)?;
+        let mut arg1_buf = [0u8; std::mem::size_of::<u16>()];
+        reader.read_exact(&mut arg1_buf)?;
+        Ok(Self::new(
+            buf[0].into(),
+            u16::from_le_bytes(arg0_buf),
+            u16::from_le_bytes(arg1_buf),
+        ))
     }
 }
 
@@ -305,7 +316,7 @@ impl Compiler {
         let loop_frame = self.loop_stack.pop().ok_or(LoopStackUnderflowError)?;
         let break_jmp_addr = self.instructions.len();
         for ip in loop_frame.break_ips {
-            self.instructions[ip.0].arg0 = break_jmp_addr as u8;
+            self.instructions[ip.0].arg0 = break_jmp_addr as u16;
         }
         Ok(())
     }
@@ -314,29 +325,29 @@ impl Compiler {
         let loop_frame = self.loop_stack.last().ok_or(LoopStackUnderflowError)?;
         let continue_jmp_addr = self.instructions.len();
         for (ip, stk) in &loop_frame.continue_ips {
-            self.instructions[ip.0].arg0 = (self.target_stack.len() - stk) as u8;
-            self.instructions[ip.0 + 1].arg0 = continue_jmp_addr as u8
+            self.instructions[ip.0].arg0 = (self.target_stack.len() - stk) as u16;
+            self.instructions[ip.0 + 1].arg0 = continue_jmp_addr as u16
         }
         Ok(())
     }
 
-    fn add_literal(&mut self, value: Value) -> u8 {
+    fn add_literal(&mut self, value: Value) -> u16 {
         let existing = self
             .literals
             .iter()
             .enumerate()
             .find(|(_, val)| **val == value);
         if let Some((i, _)) = existing {
-            i as u8
+            i as u16
         } else {
             let ret = self.literals.len();
             self.literals.push(value);
-            ret as u8
+            ret as u16
         }
     }
 
     // return the absolute position of inserted value
-    fn add_inst(&mut self, op: OpCode, arg0: u8) -> InstPtr {
+    fn add_inst(&mut self, op: OpCode, arg0: u16) -> InstPtr {
         let inst = self.instructions.len();
         self.instructions.push(Instruction { op, arg0, arg1: 0 });
         InstPtr(inst)
@@ -345,7 +356,7 @@ impl Compiler {
     fn add_copy_inst(&mut self, stack_idx: StkIdx) -> InstPtr {
         let inst = self.add_inst(
             OpCode::Copy,
-            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u16,
         );
         self.target_stack.push(Target::Temp);
         inst
@@ -359,14 +370,14 @@ impl Compiler {
         }
         let inst = self.add_inst(
             OpCode::IndexCopy,
-            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u16,
         );
         self.target_stack.pop(); // pop target array index
         self.target_stack.push(Target::Temp); // push value to copy
         inst
     }
 
-    fn add_load_literal_inst(&mut self, lit: u8) -> InstPtr {
+    fn add_load_literal_inst(&mut self, lit: u16) -> InstPtr {
         let inst = self.add_inst(OpCode::LoadLiteral, lit);
         // self.target_stack.push(Target::Literal(lit as usize));
         self.target_stack.push(Target::Literal);
@@ -386,7 +397,7 @@ impl Compiler {
         }
         let inst = self.add_inst(
             OpCode::Store,
-            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u16,
         );
         self.target_stack.pop();
         inst
@@ -400,14 +411,14 @@ impl Compiler {
         }
         let inst = self.add_inst(
             OpCode::IndexStore,
-            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u16,
         );
         self.target_stack.pop(); // pop array index
         self.target_stack.pop(); // pop value to store
         inst
     }
 
-    fn add_jf_inst(&mut self, coerce_size: Option<u8>) -> InstPtr {
+    fn add_jf_inst(&mut self, coerce_size: Option<u16>) -> InstPtr {
         // push with jump address 0, because it will be set later
         let inst = self.instructions.len();
         if let Some(size) = coerce_size {
@@ -420,7 +431,7 @@ impl Compiler {
             self.instructions.push(Instruction {
                 op: OpCode::Jf,
                 arg0: 0,
-                arg1: (self.target_stack.len() - 1) as u8,
+                arg1: (self.target_stack.len() - 1) as u16,
             });
         }
         let inst = InstPtr(inst);
@@ -429,7 +440,7 @@ impl Compiler {
     }
 
     fn fixup_jmp(&mut self, ip: InstPtr) {
-        self.instructions[ip.0].arg0 = self.instructions.len() as u8;
+        self.instructions[ip.0].arg0 = self.instructions.len() as u16;
     }
 
     /// Pop until given stack index
@@ -439,7 +450,7 @@ impl Compiler {
         }
         let inst = self.add_inst(
             OpCode::Pop,
-            (self.target_stack.len() - stack_idx.0 - 1) as u8,
+            (self.target_stack.len() - stack_idx.0 - 1) as u16,
         );
         self.target_stack.resize(stack_idx.0 + 1, Target::Temp);
         Some(inst)
@@ -628,7 +639,7 @@ impl Compiler {
                     self.add_copy_inst(*arg);
                 }
 
-                self.add_inst(OpCode::Call, args.len() as u8);
+                self.add_inst(OpCode::Call, args.len() as u16);
                 self.target_stack
                     .resize(stack_before_call + 1, Target::Temp);
                 self.coerce_stack(StkIdx(stack_before_args));
@@ -699,6 +710,37 @@ impl Compiler {
                 TypeDecl::Array(_, _) => match ex.expr.to_owned() {
                     ExprEnum::ArrayLiteral(ex) => {
                         // TODO: complete the arrays if the assigned length is less than the defined length
+                        // now, only completly empty array is supported
+                        if ex.is_empty() {
+                            let mut root_ty = ty.as_ref();
+                            let mut entire_len = *len;
+                            while let TypeDecl::Array(ty, len) = root_ty {
+                                root_ty = ty.as_ref();
+                                entire_len *= len;
+                            }
+                            match root_ty {
+                                TypeDecl::F64 => {
+                                    for _ in 0..entire_len {
+                                        let id = self.add_literal(Value::F64(0.));
+                                        self.add_load_literal_inst(id);
+                                        if stk_idx0.is_none() {
+                                            *stk_idx0 = Some(self.stack_top());
+                                        }
+                                    }
+                                }
+                                TypeDecl::Str => {
+                                    for _ in 0..entire_len {
+                                        let id = self.add_literal(Value::Str("".to_string()));
+                                        self.add_load_literal_inst(id);
+                                        if stk_idx0.is_none() {
+                                            *stk_idx0 = Some(self.stack_top());
+                                        }
+                                    }
+                                }
+                                _ => panic!("Unsupported type"),
+                            }
+                            return;
+                        }
                         if ex.len() != *len {
                             panic!("Array length mismatch: expected {len}, got {}", ex.len());
                         }
@@ -922,7 +964,7 @@ impl Compiler {
                     self.target_stack.pop();
                     self.add_store_inst(stk_loop_var);
                     self.add_pop_until_inst(stk_loop_var);
-                    self.add_inst(OpCode::Jmp, inst_check_exit as u8);
+                    self.add_inst(OpCode::Jmp, inst_check_exit as u16);
                     self.fixup_jmp(jf_inst);
                     self.fixup_breaks()?;
                 }
@@ -931,7 +973,7 @@ impl Compiler {
                     let stk_before_cond = self.stack_top();
 
                     self.compile_expr(cond)?;
-                    let jf_inst = self.add_jf_inst(Some((stk_before_cond.0 + 1) as u8));
+                    let jf_inst = self.add_jf_inst(Some((stk_before_cond.0 + 1) as u16));
                     dprintln!("start in loop: {:?}", self.target_stack);
 
                     self.loop_stack.push(LoopFrame::new(stk_before_cond));
@@ -940,7 +982,7 @@ impl Compiler {
                     self.fixup_continues()?;
 
                     self.add_pop_until_inst(stk_before_cond);
-                    self.add_inst(OpCode::Jmp, inst_check_exit as u8);
+                    self.add_inst(OpCode::Jmp, inst_check_exit as u16);
                     self.fixup_jmp(jf_inst);
                     self.fixup_breaks()?;
                 }
@@ -999,11 +1041,11 @@ impl Compiler {
                 Statement::Return(ex) => {
                     let res = self.compile_expr(ex)?;
                     self.add_copy_inst(res);
-                    self.add_inst(OpCode::Ret, (self.target_stack.len() - res.0 - 1) as u8);
+                    self.add_inst(OpCode::Ret, (self.target_stack.len() - res.0 - 1) as u16);
                 }
                 Statement::Yield(ex) => {
                     let res = self.compile_expr(ex)?;
-                    self.add_inst(OpCode::Yield, (self.target_stack.len() - res.0 - 1) as u8);
+                    self.add_inst(OpCode::Yield, (self.target_stack.len() - res.0 - 1) as u16);
                     self.target_stack.pop();
                 }
             }
@@ -1239,7 +1281,7 @@ impl Vm {
         Ok(())
     }
 
-    fn return_fn(&mut self, stack_pos: u8) -> Result<Option<YieldResult>, Box<dyn Error>> {
+    fn return_fn(&mut self, stack_pos: u16) -> Result<Option<YieldResult>, Box<dyn Error>> {
         let top_frame = self
             .stack_frames
             .pop()
