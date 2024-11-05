@@ -4,6 +4,24 @@ This is the toy language inspired by `ruscal` ([Original Source](https://github.
 I implemented this with reading 「Creating Programming Languages in Rust」, and customized it for my training.<br>
 In this language, `.kscl` code is compiled to bytecode and executed by the virtual machine.
 
+## How to use
+```
+$ cargo r -- <option> "<file name>"
+```
+
+### options
+
+| option | description |
+|:---:|:---|
+| -c | compile only |
+| -r | run bytecode |
+| -R | compile and run |
+| -o file | specify output file (default: to `bytecode.bin`) |
+| -d | show disasm |
+| -a | show AST |
+| -t | typecheck only |
+| -h | show help |
+
 ## Original Features
 
 ### while statement
