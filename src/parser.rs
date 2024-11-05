@@ -186,7 +186,23 @@ fn tc_coerce_type<'src>(
         (F64, I64) => F64,
         (I64, I64) => I64,
         (Str, Str) => Str,
-        (Array(_, _), Array(_, _)) => Array(Box::new(Any), 0), // TODO: refine array type coerce
+        (Array(ty1, len1), Array(ty2, len2)) => match tc_coerce_type(ty1, ty2, span) {
+            Ok(ty) => {
+                if len1 > len2 {
+                    return Err(TypeCheckError::new(
+                        format!("Array length mismatch: {} and {}", len1, len2),
+                        span,
+                    ));
+                }
+                Array(Box::new(ty), *len1)
+            }
+            Err(_) => {
+                return Err(TypeCheckError::new(
+                    format!("{:?} cannot be assigned to {:?}", value, target),
+                    span,
+                ))
+            }
+        },
         (Coro, Coro) => Coro,
         _ => {
             return Err(TypeCheckError::new(
@@ -336,7 +352,35 @@ fn tc_expr<'src>(
         NumLiteral(_val) => TypeDecl::F64,
         StrLiteral(_val) => TypeDecl::Str,
         // TODO: fix temporary array type
-        ArrayLiteral(_val) => TypeDecl::Array(Box::new(TypeDecl::Any), 0),
+        ArrayLiteral(val) => {
+            let mut ty: Option<TypeDecl> = None;
+            for v in val.iter() {
+                let v_ty = tc_expr(v, ctx)?;
+                if let Some(ty) = ty.as_ref() {
+                    match ty {
+                        TypeDecl::Array(_, _) => {
+                            // TODO: fix check array type
+                        }
+                        _ => {
+                            if v_ty != *ty {
+                                println!("{:?} {:?}", v_ty, ty);
+                                return Err(TypeCheckError::new(
+                                    "Array elements should have the same type".to_string(),
+                                    v.span,
+                                ));
+                            };
+                        }
+                    }
+                } else {
+                    ty = Some(v_ty);
+                }
+            }
+            if let Some(ty) = ty {
+                TypeDecl::Array(Box::new(ty), val.len())
+            } else {
+                TypeDecl::Array(Box::new(TypeDecl::Any), 0)
+            }
+        }
         ArrayIndexAccess(name, indices, ..) => {
             let var = ctx.get_var(name).ok_or_else(|| {
                 TypeCheckError::new(format!("Variable \"{}\" not found", name), e.span)

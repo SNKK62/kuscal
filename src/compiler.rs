@@ -34,6 +34,8 @@ pub enum OpCode {
     Jmp,
     /// Jump if false
     Jf,
+    /// Exit if false
+    Exitf,
     Not,
     Lt,
     Eq,
@@ -79,6 +81,7 @@ impl_op_from!(
     Call,
     Jmp,
     Jf,
+    Exitf,
     Not,
     Lt,
     Eq,
@@ -558,25 +561,29 @@ impl Compiler {
                     }
                     cumulative_lengths.pop();
                     cumulative_lengths.reverse();
-                    cumulative_lengths.pop();
 
                     let index_idx = self.add_literal(Value::F64(0.)); // temp sum
                     self.add_load_literal_inst(index_idx);
-                    let last_stk_idx = stk_idxs.pop().unwrap();
                     for (i, stk_idx) in stk_idxs.iter().enumerate() {
+                        // check index out of range
+                        self.add_copy_inst(*stk_idx);
+                        let index_inst_idx = self.add_literal(Value::F64(array_lengths[i] as f64));
+                        self.add_load_literal_inst(index_inst_idx); // max index
+                        self.add_inst(OpCode::Lt, 0);
+                        self.add_inst(OpCode::Exitf, 0);
+                        self.target_stack.pop();
+                        self.target_stack.pop();
+
                         self.add_copy_inst(*stk_idx);
                         let idx = self.add_literal(Value::F64(cumulative_lengths[i] as f64));
                         self.add_load_literal_inst(idx);
+
                         self.add_inst(OpCode::Mul, 0);
                         self.target_stack.pop(); // for mul
 
                         self.add_inst(OpCode::Add, 0);
                         self.target_stack.pop(); // for add
                     }
-                    self.add_copy_inst(last_stk_idx);
-                    self.add_inst(OpCode::Add, 0);
-                    self.target_stack.pop(); // for add
-
                     self.add_index_copy_inst(StkIdx(idx));
                     self.stack_top()
                 } else {
@@ -854,12 +861,19 @@ impl Compiler {
                     }
                     cumulative_lengths.pop();
                     cumulative_lengths.reverse();
-                    cumulative_lengths.pop();
 
                     let index_idx = self.add_literal(Value::F64(0.)); // temp sum
                     self.add_load_literal_inst(index_idx);
-                    let last_stk_idx = stk_idxs.pop().unwrap();
                     for (i, stk_idx) in stk_idxs.iter().enumerate() {
+                        // check index out of range
+                        self.add_copy_inst(*stk_idx);
+                        let index_inst_idx = self.add_literal(Value::F64(array_lengths[i] as f64));
+                        self.add_load_literal_inst(index_inst_idx); // max index
+                        self.add_inst(OpCode::Lt, 0);
+                        self.add_inst(OpCode::Exitf, 0);
+                        self.target_stack.pop();
+                        self.target_stack.pop();
+
                         self.add_copy_inst(*stk_idx);
                         let idx = self.add_literal(Value::F64(cumulative_lengths[i] as f64));
                         self.add_load_literal_inst(idx);
@@ -869,10 +883,6 @@ impl Compiler {
                         self.add_inst(OpCode::Add, 0);
                         self.target_stack.pop(); // for add
                     }
-                    self.add_copy_inst(last_stk_idx);
-                    self.add_inst(OpCode::Add, 0);
-                    self.target_stack.pop(); // for add
-
                     let index_stk_idx = self.stack_top();
 
                     self.add_copy_inst(stk_ex);
@@ -1408,6 +1418,13 @@ impl Vm {
                             .stack
                             .resize(instruction.arg1 as usize, Value::F64(0.));
                         continue;
+                    }
+                }
+                OpCode::Exitf => {
+                    let stack = &mut self.top_mut()?.stack;
+                    let cond = stack.pop().expect("Exitf needs an argument");
+                    if cond.coerce_f64() == 0. {
+                        return Err("Index out of bounds".into()); // TODO: customize message
                     }
                 }
                 OpCode::Not => {
