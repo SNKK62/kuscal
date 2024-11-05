@@ -1,7 +1,7 @@
 # kuscal
 
 This is the toy language inspired by `ruscal` ([Original Source](https://github.com/msakuta/ruscal)).<br>
-I implemented this with reading 「Creating Programming Languages in Rust」, and customized it for my training.<br>
+I implemented this with reading [「Creating Programming Languages in Rust」](https://gihyo.jp/book/2024/978-4-297-14192-9), and customized it for my training.<br>
 In this language, `.kscl` code is compiled to bytecode and executed by the virtual machine.
 
 ## How to use
