@@ -3,7 +3,7 @@ var b: f64 = 10;
 var i: f64 = 0;
 
 while i < 5 {
-    print(a[i]);
+    print(a[i], " ");
     b = a[i];
     a[i] = pow(b, 2);
     i = i + 1;
@@ -13,7 +13,7 @@ println("");
 i = 0;
 
 while i < 5 {
-    print(a[i]);
+    print(a[i], " ");
     i = i + 1;
 }
 println("");
